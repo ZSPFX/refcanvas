@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=refcanvas
+Comment=GPU-accelerated infinite canvas for reference images
+Exec=refcanvas
+Icon=refcanvas
+StartupWMClass=refcanvas
+Terminal=false
+Categories=Graphics;
+Keywords=reference;canvas;images;moodboard;

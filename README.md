@@ -1,4 +1,4 @@
-# refcanvas
+# <sub><img src="https://cdn.zspfx.com/refcanvas/icon.svg" width="32" height="32" alt=""></sub> refcanvas
 
 A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.20 with Vulkan rendering.
 
@@ -56,7 +56,6 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.
 - Change frame color
 - Notify new version release
 - DB Lock
-- App Icon
 
 ## Download & Installation
 

@@ -1,0 +1,19 @@
+/target
+/.cargo
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# makepkg artifacts (packaging/)
+/packaging/src
+/packaging/pkg
+/packaging/*.pkg.tar.*
+# makepkg's source clone of this repo (SRCDEST), regenerated each run
+/packaging/refcanvas/
+
+# release artifacts (scripts/build-release.sh)
+/dist
+
+# local-only parked files (not in the repo)
+/.dump

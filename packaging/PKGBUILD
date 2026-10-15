@@ -1,0 +1,68 @@
+# Maintainer: zspfx <management@zspfx.com>
+# Local-only package. Normally assembled by scripts/build-release.sh, which sets
+# REF_PREBUILT_BIN so build() reuses the binary it already built (no second
+# compile) and drops the package in dist/; install with
+#   sudo pacman -U dist/refcanvas-*.pkg.tar.zst
+# Run `makepkg -c` for a full build from this checkout's committed HEAD; the -c
+# cleans up the src/ and pkg/ trees afterwards (makepkg's SRCDEST clone lands in
+# refcanvas/ — rm -rf it too if you want the directory pristine).
+# (pkgver is synced from Cargo.toml by scripts/build-release.sh.)
+
+pkgname=refcanvas
+pkgver=0.1.2
+pkgrel=1
+pkgdesc="GPU-accelerated infinite canvas for reference images"
+arch=('x86_64')
+license=('GPL3')
+depends=('gtk3' 'vulkan-icd-loader' 'xdg-utils' 'dbus')
+makedepends=('rustup')  # cargo/rustc come from the rustup-managed toolchain
+source=("$pkgname::git+file://$HOME/Projects/refcanvas"
+        "refcanvas.desktop")
+sha256sums=('SKIP'
+            'SKIP')
+
+build() {
+    cd "$pkgname"
+
+    # Release pipeline (scripts/build-release.sh) already compiled and stripped
+    # the binary; reuse it instead of building a second time. CARGO_TARGET_DIR
+    # is exported so package() finds it below.
+    if [[ -n ${REF_PREBUILT_BIN:-} ]]; then
+        install -Dm755 "$REF_PREBUILT_BIN" target/release/refcanvas
+        # package() installs the icons from this source tree, but the clone sits
+        # at HEAD: refresh them from the real working tree so an uncommitted icon
+        # still lands in the package. Everything else in the package comes from
+        # the working tree too (the binary via REF_PREBUILT_BIN, the desktop file
+        # via `source=()`), so no commit is needed to package.
+        if [[ -n ${REF_ASSETS_DIR:-} && -d ${REF_ASSETS_DIR:-} ]]; then
+            install -d assets/icons
+            install -m644 "$REF_ASSETS_DIR"/refcanvas-*.png assets/icons/
+        fi
+        export CARGO_TARGET_DIR="$PWD/target"
+        return
+    fi
+
+    # Build the way the dev scripts do. makepkg's distro flags (see
+    # /etc/makepkg.conf.d/) break this link:
+    #  - CFLAGS carries `-flto=auto`, so the cc crate compiles the bundled
+    #    sqlite into non-fat GIMPLE LTO objects, neither bfd nor lld can
+    #    read those without gcc's LTO plugin ("undefined symbol: sqlite3_*");
+    #  - RUSTFLAGS *replaces* the repo cargo config's rustflags, dropping
+    #    `-fuse-ld=lld` (clang then falls back to GNU ld).
+    # Drop the distro C flags and keep lld, matching dev builds.
+    unset CFLAGS CXXFLAGS LDFLAGS
+    export RUSTFLAGS="${RUSTFLAGS-} -C link-arg=-fuse-ld=lld"
+    cargo build --release --locked
+}
+
+package() {
+    cd "$pkgname"
+    install -Dm755 "${CARGO_TARGET_DIR:-target}/release/refcanvas" \
+        "$pkgdir/usr/bin/refcanvas"
+    install -Dm644 "$srcdir/refcanvas.desktop" \
+        "$pkgdir/usr/share/applications/refcanvas.desktop"
+    for size in 16 22 24 32 48 64 128 256 512; do
+        install -Dm644 "assets/icons/refcanvas-$size.png" \
+            "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/refcanvas.png"
+    done
+}

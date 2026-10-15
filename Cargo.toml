@@ -1,0 +1,123 @@
+[package]
+name = "refcanvas"
+version = "0.1.2"
+edition = "2024"
+description = "GPU-accelerated infinite canvas for reference images"
+license = "GPL-3.0-or-later"
+
+[features]
+default = []
+# Faster iteration: links bevy as a shared library (dev only)
+dev_dylib = ["bevy/dynamic_linking"]
+# Live code hotpatching (experimental, needs the Dioxus CLI) + asset hot-reloading.
+# Run with scripts/hotpatch.sh instead of cargo.
+hotpatch = ["bevy/hotpatching", "bevy/file_watcher"]
+
+[dependencies]
+bevy = { version = "0.20.0", default-features = false, features = [
+    # app core
+    "std",
+    "multi_threaded",
+    "async_executor",
+    "bevy_asset",
+    "bevy_log",
+    "bevy_state",
+    "bevy_winit",
+    "bevy_window",
+    "default_font",
+    "x11",
+    "wayland",
+    # rendering (2d)
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_post_process",
+    "bevy_sprite",
+    "bevy_sprite_render",
+    "bevy_gizmos",
+    "bevy_gizmos_render",
+    "bevy_camera",
+    "bevy_color",
+    "bevy_image",
+    "bevy_mesh",
+    "bevy_shader",
+    "bevy_material",
+    # text + ui
+    "bevy_text",
+    "bevy_ui",
+    "bevy_ui_render",
+    "bevy_input_focus",
+    # image formats
+    "png",
+    "jpeg",
+    "webp",
+    "bmp",
+    "gif",
+    "tga",
+    "tiff",
+] }
+# Default features minus `picking`: we don't add Bevy's PickingPlugin, and the
+# feature only produces a startup warning.
+bevy_egui = { version = "0.43", default-features = false, features = [
+    "manage_clipboard",
+    "open_url",
+    "default_fonts",
+    "render",
+    "bevy_ui",
+] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+# System clipboard (Ctrl+C / Ctrl+V). `wayland-data-control` speaks the
+# native Wayland protocol (wl-clipboard equivalent) and falls back to X11
+# when the compositor doesn't offer it; on X11 arboard serves the selection
+# from its own thread.
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+    "bmp",
+    "gif",
+    "tga",
+    "tiff",
+] }
+blake3 = "1"
+directories = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+# Only for `winit::window::Icon`, used to set the window icon on X11/Windows.
+# Version- and feature-matched with Bevy's own winit dependency (which
+# [patch.crates-io] at the bottom already redirects to vendor/winit).
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+
+# Reveal-in-Explorer needs the shell API (`SHOpenFolderAndSelectItems`):
+# explorer.exe's `/select,` command line is unreliable. Version-matched with
+# the copy rfd/winit already resolve.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
+
+[profile.dev]
+opt-level = 1
+# No debug info: keeps the hotpatch binary small so relinking + patch
+# computation stay fast. (Set to 1 or 2 if you want panic line numbers back.)
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+
+# Native Wayland file drag-and-drop. winit 0.30 has no `wl_data_device`
+# support (file-drop events are only emitted by the X11/macOS/Windows
+# backends), so this is winit 0.30.13 with the unmerged v0.30.x PR
+# rust-windowing/winit#4269 applied; see vendor/README.md. Drop this patch
+# once Bevy uses a winit with Wayland DnD (0.31+).
+[patch.crates-io]
+winit = { path = "vendor/winit" }

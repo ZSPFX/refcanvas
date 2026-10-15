@@ -1,0 +1,2 @@
+- Warn version mismatched from Sqllite database file. (Multiple artists not on the same version)
+- Locked file by default, unlock with top right lock icon (Changes conflicts)

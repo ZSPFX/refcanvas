@@ -2,6 +2,7 @@
 
 mod canvas;
 mod clipboard;
+mod instance;
 mod project;
 mod theme;
 mod ui;
@@ -10,12 +11,12 @@ use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 use bevy::app::{TaskPoolOptions, TaskPoolPlugin, TaskPoolThreadAssignmentPolicy};
+use bevy::ecs::system::NonSendMarker;
 use bevy::prelude::*;
 use bevy::window::{
     MonitorSelection, PresentMode, PrimaryWindow, WindowPosition, WindowResized, WindowResolution,
 };
-use bevy::ecs::system::NonSendMarker;
-use bevy::winit::{UpdateMode, WinitSettings, WINIT_WINDOWS};
+use bevy::winit::{UpdateMode, WINIT_WINDOWS, WinitSettings};
 use winit::window::Icon;
 
 use canvas::CanvasPlugin;
@@ -82,6 +83,23 @@ fn frame_latency() -> NonZeroU32 {
 }
 
 fn main() {
+    // Only allow one window per user at a time.
+    let _instance = if instance::enabled() {
+        match instance::acquire() {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => {
+                eprintln!("refcanvas is already running, only one window is allowed");
+                return;
+            }
+            Err(err) => {
+                eprintln!("refcanvas: cannot enforce a single instance: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -307,7 +325,13 @@ fn idle_throttle(
     loads: Query<(), With<FullLoadTask>>,
     nodes: Query<&CanvasNode, Without<canvas::node::InactiveTab>>,
     parking: Query<(), (With<Mesh2d>, With<canvas::node::InactiveTab>)>,
-    resuming: Query<(), (With<canvas::lod::ParkedMesh>, Without<canvas::node::InactiveTab>)>,
+    resuming: Query<
+        (),
+        (
+            With<canvas::lod::ParkedMesh>,
+            Without<canvas::node::InactiveTab>,
+        ),
+    >,
 ) {
     // A live resize counts as busy: on Wayland the client drives the resize,
     // so a sleeping loop makes the window lag seconds behind the pointer.

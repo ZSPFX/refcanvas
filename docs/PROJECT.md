@@ -25,6 +25,10 @@ cargo run --features dev_dylib   # run a normal dev build (fast relinks)
 ./scripts/make-icons.sh          # regenerate the icon rasters from icon.svg
 ```
 
+Only one refcanvas instance can run per user, so a second launch exits instead
+of opening another window. Set `REF_MULTIPLE_INSTANCES=1` to bypass the guard
+when running dev builds side by side.
+
 `build-release.sh` compiles once, strips once, then produces every artifact in
 `dist/`: makepkg only *assembles* the Arch package (`PKGBUILD`'s `build()`
 reuses the binary via `REF_PREBUILT_BIN` and refreshes the icons from the working

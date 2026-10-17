@@ -9,7 +9,7 @@
 # (pkgver is synced from Cargo.toml by scripts/build-release.sh.)
 
 pkgname=refcanvas
-pkgver=0.1.2
+pkgver=0.1.3
 pkgrel=1
 pkgdesc="GPU-accelerated infinite canvas for reference images"
 arch=('x86_64')

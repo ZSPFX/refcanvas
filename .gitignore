@@ -17,3 +17,5 @@
 
 # local-only parked files (not in the repo)
 /.dump
+
+/mds/

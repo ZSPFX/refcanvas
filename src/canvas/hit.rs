@@ -18,6 +18,12 @@ pub enum HitKind {
 pub const HANDLE_HIT_PX: f32 = 9.0;
 /// Rotation zone radius beyond a corner, logical pixels.
 pub const ROTATE_ZONE_PX: f32 = 26.0;
+/// Touch handles need a much larger target than a mouse cursor.
+pub const TOUCH_HANDLE_HIT_PX: f32 = 22.0;
+/// Rotation zone for touch, logical pixels.
+pub const TOUCH_ROTATE_ZONE_PX: f32 = 36.0;
+/// Finger slop around a node when picking, logical pixels.
+pub const TOUCH_NODE_SLOP_PX: f32 = 8.0;
 
 /// Corner directions in local space (y up): TL, TR, BR, BL.
 pub const CORNER_DIRS: [Vec2; 4] = [
@@ -51,15 +57,39 @@ pub fn edge_world(pose: &Pose, i: usize) -> Vec2 {
 
 /// Is `world` inside the (possibly rotated) node?
 pub fn point_inside(world: Vec2, pose: &Pose) -> bool {
+    point_inside_with_slop(world, pose, 0.0)
+}
+
+/// [`point_inside`] with a world-space slop around the node bounds.
+pub fn point_inside_with_slop(world: Vec2, pose: &Pose, slop: f32) -> bool {
     let local = rot2(-pose.rot) * (world - pose.center);
-    local.x.abs() <= pose.size.x * 0.5 && local.y.abs() <= pose.size.y * 0.5
+    local.x.abs() <= pose.size.x * 0.5 + slop && local.y.abs() <= pose.size.y * 0.5 + slop
 }
 
 /// Hit test the handles / rotation zones of a selection frame.
 /// `wpp` is world units per logical pixel.
 pub fn hit_frame(world: Vec2, frame: &Pose, wpp: f32) -> Option<HitKind> {
-    let handle_r = HANDLE_HIT_PX * wpp;
-    let rotate_r = ROTATE_ZONE_PX * wpp;
+    hit_frame_with_radii(world, frame, wpp, HANDLE_HIT_PX, ROTATE_ZONE_PX)
+}
+
+/// Touch radii for `frame`, logical pixels. The enlarged touch target shrinks
+/// on small frames so it cannot swallow the whole node body.
+pub fn touch_radii(frame: &Pose, wpp: f32) -> (f32, f32) {
+    let min_dim = (frame.size.min_element() / wpp.max(1e-6)).max(1.0);
+    let handle = TOUCH_HANDLE_HIT_PX.min(min_dim * 0.28).max(6.0);
+    (handle, TOUCH_ROTATE_ZONE_PX.min(handle + 14.0))
+}
+
+/// [`hit_frame`] with explicit handle and rotation radii, logical pixels.
+pub fn hit_frame_with_radii(
+    world: Vec2,
+    frame: &Pose,
+    wpp: f32,
+    handle_px: f32,
+    rotate_px: f32,
+) -> Option<HitKind> {
+    let handle_r = handle_px * wpp;
+    let rotate_r = rotate_px * wpp;
 
     let mut best: Option<(f32, HitKind)> = None;
     let consider = |d: f32, kind: HitKind, best: &mut Option<(f32, HitKind)>| {

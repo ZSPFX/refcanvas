@@ -13,10 +13,11 @@ pub mod manipulate;
 pub mod node;
 pub mod selection;
 pub mod snap;
+pub mod touch;
 pub mod undo;
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 
 /// Remembers when each modifier was last active. Key chords can arrive split
 /// across frames (especially with synthetic input), so we accept a modifier
@@ -56,20 +57,12 @@ pub fn track_chords(
     }
 }
 
-pub fn ctrl_down(
-    keys: &ButtonInput<KeyCode>,
-    mem: &ChordMemory,
-    frame: u64,
-) -> bool {
+pub fn ctrl_down(keys: &ButtonInput<KeyCode>, mem: &ChordMemory, frame: u64) -> bool {
     keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
         || frame.saturating_sub(mem.ctrl_last) <= CHORD_GRACE_FRAMES
 }
 
-pub fn shift_down(
-    keys: &ButtonInput<KeyCode>,
-    mem: &ChordMemory,
-    frame: u64,
-) -> bool {
+pub fn shift_down(keys: &ButtonInput<KeyCode>, mem: &ChordMemory, frame: u64) -> bool {
     keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
         || frame.saturating_sub(mem.shift_last) <= CHORD_GRACE_FRAMES
 }
@@ -135,6 +128,9 @@ impl Plugin for CanvasPlugin {
             .init_resource::<frames::FrameLabelHits>()
             .init_resource::<frames::FrameRename>()
             .init_resource::<ChordMemory>()
+            .init_resource::<touch::Pointer>()
+            .init_resource::<touch::TouchState>()
+            .init_resource::<touch::Inertia>()
             .init_resource::<lod::TexBudget>()
             .add_systems(Last, lod::park_inactive_meshes)
             .add_systems(
@@ -150,6 +146,8 @@ impl Plugin for CanvasPlugin {
                 (
                     lod::tick_frame,
                     track_chords,
+                    touch::touch_input,
+                    touch::apply_inertia,
                     camera::view_input,
                     // Before `view_smooth`: focus/arrow hops must set their
                     // target (and thus the ease's redraw request) within the
@@ -193,8 +191,7 @@ impl Plugin for CanvasPlugin {
             // cursors win over the canvas and egui's win over its UI.
             .add_systems(
                 PostUpdate,
-                cursor::update_cursor
-                    .after(bevy_egui::EguiPostUpdateSet::PostProcessOutput),
+                cursor::update_cursor.after(bevy_egui::EguiPostUpdateSet::PostProcessOutput),
             );
 
         // Render-world half of the texture-upload bookkeeping (see

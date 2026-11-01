@@ -10,6 +10,7 @@ use super::frames::{FrameLabelHits, FrameRename, LABEL_DOUBLE_CLICK};
 use super::hit::{self, HitKind};
 use super::manipulate::{self, RotateDrag, ScaleDrag, ZCounter, current_pose};
 use super::node::{InactiveTab, CanvasNode, NodeKind, NodeSnapshot, Pose, TabOwner};
+use super::touch::{Pointer, TOUCH_DRAG_THRESHOLD_PX};
 use super::undo::{UndoEntry, UndoStack, snapshot_of};
 use crate::project::tabs::Tabs;
 
@@ -183,6 +184,7 @@ pub fn pick_topmost(
     q: &NodeQ,
     keep: impl Fn(Entity) -> bool,
     label_hits: &super::frames::FrameLabelHits,
+    slop: f32,
 ) -> Option<(Entity, Pose)> {
     let mut items: Vec<(Entity, f32)> = q
         .iter()
@@ -198,12 +200,45 @@ pub fn pick_topmost(
             let on_label = label_hits
                 .get(e)
                 .is_some_and(|label| hit::point_inside(cursor_world, label));
-            if hit::point_inside(cursor_world, &pose) || on_label {
+            if hit::point_inside_with_slop(cursor_world, &pose, slop) || on_label {
                 return Some((e, pose));
             }
         }
     }
     None
+}
+
+/// Handle a press on a frame label. Returns true if it started a rename.
+pub fn press_label(
+    entity: Entity,
+    cursor_world: Vec2,
+    label_hits: &FrameLabelHits,
+    rename: &mut FrameRename,
+    selection: &mut Selection,
+    q: &NodeQ,
+) -> bool {
+    if !label_hits
+        .get(entity)
+        .is_some_and(|label| hit::point_inside(cursor_world, label))
+    {
+        rename.last_click = None;
+        return false;
+    }
+    let now = std::time::Instant::now();
+    let double = rename
+        .last_click
+        .is_some_and(|(t, e)| e == entity && now.duration_since(t) <= LABEL_DOUBLE_CLICK);
+    rename.last_click = if double { None } else { Some((now, entity)) };
+    if double && rename.frame.is_none() {
+        if let Ok((_, _, _, node)) = q.get(entity) {
+            if let NodeKind::Frame(frame_node) = &node.kind {
+                rename.start(entity, frame_node.label.clone());
+                selection.nodes = vec![entity];
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// World rect of the camera's view, grown by the snap falloff band.
@@ -238,8 +273,7 @@ fn snap_candidates(
 
 #[allow(clippy::too_many_arguments)]
 pub fn pointer_events(
-    window: Single<&Window, With<PrimaryWindow>>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    pointer: Res<Pointer>,
     keys: Res<ButtonInput<KeyCode>>,
     camera: Single<(&Camera, &GlobalTransform)>,
     mut contexts: EguiContexts,
@@ -256,7 +290,7 @@ pub fn pointer_events(
 ) {
     let egui_busy = egui_pointer_busy(&mut contexts);
 
-    if mouse.just_released(MouseButton::Left) {
+    if pointer.just_released {
         // A Shift press that never became a drag is a Shift click: toggle the
         // pressed node back out of the selection (dragging moves it instead).
         let toggle = match &*interaction {
@@ -287,17 +321,17 @@ pub fn pointer_events(
         *interaction = Interaction::Idle;
     }
 
-    if !mouse.just_pressed(MouseButton::Left) || egui_busy {
+    if !pointer.just_pressed || egui_busy || (pointer.is_touch && pointer.touch_pan) {
         return;
     }
     let shift = crate::canvas::shift_down(&keys, &chords.mem, chords.frame.0);
     let alt = crate::canvas::alt_down(&keys, &chords.mem, chords.frame.0);
-    if keys.pressed(KeyCode::Space) {
+    if !pointer.is_touch && keys.pressed(KeyCode::Space) {
         return; // Space+LMB is pan navigation
     }
 
     let (camera, cam_tf) = *camera;
-    let Some(cursor) = window.cursor_position() else {
+    let Some(cursor) = pointer.screen else {
         return;
     };
     let Ok(cursor_world) = camera.viewport_to_world_2d(cam_tf, cursor) else {
@@ -316,7 +350,14 @@ pub fn pointer_events(
     });
     if !on_selected_label {
         if let Some(frame) = selection_frame_of(&q, &selection) {
-            if let Some(kind) = hit::hit_frame(cursor_world, &frame, wpp) {
+            let (handle_px, rotate_px) = if pointer.is_touch {
+                hit::touch_radii(&frame, wpp)
+            } else {
+                (hit::HANDLE_HIT_PX, hit::ROTATE_ZONE_PX)
+            };
+            if let Some(kind) =
+                hit::hit_frame_with_radii(cursor_world, &frame, wpp, handle_px, rotate_px)
+            {
                 let ctrl = crate::canvas::ctrl_down(&keys, &chords.mem, chords.frame.0);
                 match kind {
                     HitKind::Corner(_) | HitKind::Edge(_) => {
@@ -362,33 +403,45 @@ pub fn pointer_events(
         }
     }
 
+    // Touch double tap inside the selection frame drags the whole selection,
+    // including empty gaps between the nodes of a multi-selection.
+    let double_tap_selection = pointer.is_touch
+        && pointer.double_tap
+        && !on_selected_label
+        && !selection.nodes.is_empty()
+        && selection_frame_of(&q, &selection)
+            .is_some_and(|frame| hit::point_inside(cursor_world, &frame));
+    if double_tap_selection {
+        *interaction = Interaction::PendingMove {
+            press_screen: cursor,
+            start_world: cursor_world,
+            snapshots: drag_snapshots(&q, &selection),
+            toggle_off: None,
+        };
+        return;
+    }
+
     // 2) Node bodies.
     let keep = owner_filter(tabs.active_id(), &q_own);
-    let hit = pick_topmost(cursor_world, &q, &keep, &label_hits);
+    let slop = if pointer.is_touch {
+        hit::TOUCH_NODE_SLOP_PX * wpp
+    } else {
+        0.0
+    };
+    let hit = pick_topmost(cursor_world, &q, &keep, &label_hits, slop);
     if let Some((entity, _pose)) = hit {
         // Double-click on a frame's label: rename the frame (see
         // `FrameRename`). The first click behaves normally.
-        if label_hits
-            .get(entity)
-            .is_some_and(|label| hit::point_inside(cursor_world, label))
-        {
-            let now = std::time::Instant::now();
-            let double = rename
-                .last_click
-                .is_some_and(|(t, e)| e == entity && now.duration_since(t) <= LABEL_DOUBLE_CLICK);
-            rename.last_click = if double { None } else { Some((now, entity)) };
-            if double && rename.frame.is_none() {
-                if let Ok((_, _, _, node)) = q.get(entity) {
-                    if let NodeKind::Frame(frame_node) = &node.kind {
-                        rename.start(entity, frame_node.label.clone());
-                        selection.nodes = vec![entity];
-                        *interaction = Interaction::Idle;
-                        return;
-                    }
-                }
-            }
-        } else {
-            rename.last_click = None;
+        if press_label(
+            entity,
+            cursor_world,
+            &label_hits,
+            &mut rename,
+            &mut selection,
+            &q,
+        ) {
+            *interaction = Interaction::Idle;
+            return;
         }
         // Shift must not decide selection membership at press time: pressing
         // a selected node with Shift held then dragging moves the selection
@@ -428,6 +481,11 @@ pub fn pointer_events(
     }
 
     // 3) Empty space: marquee.
+    // One finger pans the canvas; only a double tap starts a marquee.
+    if pointer.is_touch && !pointer.double_tap {
+        *interaction = Interaction::Idle;
+        return;
+    }
     rename.last_click = None;
     if !shift {
         selection.clear();
@@ -442,7 +500,7 @@ pub fn pointer_events(
 
 pub fn apply_interaction(
     window: Single<&Window, With<PrimaryWindow>>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    pointer: Res<Pointer>,
     keys: Res<ButtonInput<KeyCode>>,
     camera: Single<(&Camera, &GlobalTransform)>,
     mut selection: ResMut<Selection>,
@@ -462,10 +520,13 @@ pub fn apply_interaction(
         ..
     } = &*interaction
     {
-        if let Some(cursor) = window.cursor_position() {
-            if mouse.pressed(MouseButton::Left)
-                && cursor.distance(*press_screen) > MOVE_THRESHOLD_PX
-            {
+        if let Some(cursor) = pointer.screen {
+            let threshold = if pointer.is_touch {
+                TOUCH_DRAG_THRESHOLD_PX
+            } else {
+                MOVE_THRESHOLD_PX
+            };
+            if pointer.pressed && cursor.distance(*press_screen) > threshold {
                 promote = Some((*start_world, snapshots.clone()));
             }
         }
@@ -483,7 +544,7 @@ pub fn apply_interaction(
     let alt = crate::canvas::alt_down(&keys, &chord_mem, chord_frame.0);
 
     let (camera, cam_tf) = *camera;
-    let cursor = window.cursor_position();
+    let cursor = pointer.screen;
     let cursor_world = cursor.and_then(|c| camera.viewport_to_world_2d(cam_tf, c).ok());
     let wpp = world_per_logical_px(camera, cam_tf).unwrap_or(1.0) as f32;
     // Snapping only considers nodes the camera can see (plus a falloff

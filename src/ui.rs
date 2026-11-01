@@ -140,6 +140,7 @@ enum AlignKind {
 fn context_menu_input(
     window: Single<&Window, With<PrimaryWindow>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    pointer: Res<crate::canvas::touch::Pointer>,
     keys: Res<ButtonInput<KeyCode>>,
     camera: Single<(&Camera, &GlobalTransform)>,
     mut contexts: EguiContexts,
@@ -147,15 +148,16 @@ fn context_menu_input(
     mut selection: ResMut<Selection>,
     tabs: Res<Tabs>,
     label_hits: Res<crate::canvas::frames::FrameLabelHits>,
-    q_own: Query<(Entity, &crate::canvas::node::TabOwner), Without<crate::canvas::node::InactiveTab>>,
+    q_own: Query<
+        (Entity, &crate::canvas::node::TabOwner),
+        Without<crate::canvas::node::InactiveTab>,
+    >,
     q: NodeQ,
 ) {
     // Close on Escape or on a click *outside* the menu. (Clicks inside the
     // menu must reach egui, or menu items could never be activated.)
     let pointer_over_egui = crate::canvas::egui_pointer_busy(&mut contexts);
-    if keys.just_pressed(KeyCode::Escape)
-        || (mouse.just_pressed(MouseButton::Left) && !pointer_over_egui)
-    {
+    if keys.just_pressed(KeyCode::Escape) || (pointer.just_pressed && !pointer_over_egui) {
         menu.open = false;
     }
     let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
@@ -173,7 +175,7 @@ fn context_menu_input(
         return;
     };
     let keep = selection::owner_filter(tabs.active_id(), &q_own);
-    let node = selection::pick_topmost(world, &q, &keep, &label_hits).map(|(e, _)| e);
+    let node = selection::pick_topmost(world, &q, &keep, &label_hits, 0.0).map(|(e, _)| e);
     if let Some(e) = node {
         if !selection.contains(e) {
             selection.nodes = vec![e];
@@ -203,7 +205,10 @@ fn context_menu_ui(
     mut import_queue: ResMut<ImportQueue>,
     mut interaction: ResMut<Interaction>,
     mut undo: ResMut<UndoStack>,
-    q_own: Query<(Entity, &crate::canvas::node::TabOwner), Without<crate::canvas::node::InactiveTab>>,
+    q_own: Query<
+        (Entity, &crate::canvas::node::TabOwner),
+        Without<crate::canvas::node::InactiveTab>,
+    >,
 ) -> Result {
     if !menu.open {
         return Ok(());
@@ -720,7 +725,10 @@ fn frame_rename_ui(
     view: Res<View>,
     label_hits: Res<FrameLabelHits>,
     tabs: Res<Tabs>,
-    q_own: Query<(Entity, &crate::canvas::node::TabOwner), Without<crate::canvas::node::InactiveTab>>,
+    q_own: Query<
+        (Entity, &crate::canvas::node::TabOwner),
+        Without<crate::canvas::node::InactiveTab>,
+    >,
     mut q: NodeQ,
     mut labels: Query<(&FrameLabel, &mut Text2d)>,
 ) -> Result {
@@ -839,83 +847,86 @@ fn tab_bar(
     // bar instead of relying on the frame margin plus manual spacing.
     let tabs_frame =
         egui::Frame::side_top_panel(root.style()).inner_margin(egui::Margin::symmetric(8, 4));
-    let tabs_panel = egui::Panel::top("refcanvas_tabs").frame(tabs_frame).show(&mut root, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            // Track the tallest tab so the "+" button can match it exactly.
-            let mut row_h = ui.spacing().interact_size.y;
-            let active = tabs.active_id();
-            for (id, name) in tabs.summaries() {
-                let selected = Some(id) == active;
+    let tabs_panel = egui::Panel::top("refcanvas_tabs")
+        .frame(tabs_frame)
+        .show(&mut root, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                // Track the tallest tab so the "+" button can match it exactly.
+                let mut row_h = ui.spacing().interact_size.y;
+                let active = tabs.active_id();
+                for (id, name) in tabs.summaries() {
+                    let selected = Some(id) == active;
 
-                // Hover/press feedback is the accent tint only: no outline
-                // stroke and no expansion around the tab.
-                let resp = ui
-                    .scope(|ui| {
-                        let v = ui.visuals_mut();
-                        v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-                        v.widgets.hovered.expansion = 0.0;
-                        v.widgets.active.bg_stroke = egui::Stroke::NONE;
-                        v.widgets.active.expansion = 0.0;
-                        ui.selectable_label(selected, truncate(&name, 24))
-                    })
-                    .inner; // .inner = the label's Response, so resp.clicked() still works
-                row_h = row_h.max(resp.rect.height());
+                    // Hover/press feedback is the accent tint only: no outline
+                    // stroke and no expansion around the tab.
+                    let resp = ui
+                        .scope(|ui| {
+                            let v = ui.visuals_mut();
+                            v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                            v.widgets.hovered.expansion = 0.0;
+                            v.widgets.active.bg_stroke = egui::Stroke::NONE;
+                            v.widgets.active.expansion = 0.0;
+                            ui.selectable_label(selected, truncate(&name, 24))
+                        })
+                        .inner; // .inner = the label's Response, so resp.clicked() still works
+                    row_h = row_h.max(resp.rect.height());
 
-                if resp.clicked() {
-                    pending.push(TabRequest::Switch(id));
-                }
-                if resp.middle_clicked() {
-                    pending.push(TabRequest::Close(id));
-                }
-                resp.context_menu(|ui| {
-                    if ui
-                        .add_enabled(tabs.len() > 1, egui::Button::new("Close tab"))
-                        .clicked()
-                    {
-                        pending.push(TabRequest::Close(id));
-                        ui.close();
+                    if resp.clicked() {
+                        pending.push(TabRequest::Switch(id));
                     }
-                    if let Some(root) = tabs.root_of(id) {
+                    if resp.middle_clicked() {
+                        pending.push(TabRequest::Close(id));
+                    }
+                    resp.context_menu(|ui| {
                         if ui
-                            .button("Open project folder")
-                            .on_hover_text(root.display().to_string())
+                            .add_enabled(tabs.len() > 1, egui::Button::new("Close tab"))
                             .clicked()
                         {
-                            open_folder(&root);
+                            pending.push(TabRequest::Close(id));
                             ui.close();
                         }
+                        if let Some(root) = tabs.root_of(id) {
+                            if ui
+                                .button("Open project folder")
+                                .on_hover_text(root.display().to_string())
+                                .clicked()
+                            {
+                                open_folder(&root);
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.add_space(3.0);
+                }
+                // "+" is a square button with a hand-painted plus: the stock
+                // `menu_button` glyph is neither 1:1 nor optically centered.
+                let side = row_h;
+                let (resp, _) = egui::containers::menu::MenuButton::from_button(
+                    egui::Button::new("").min_size(egui::vec2(side, side)),
+                )
+                .ui(ui, |ui| {
+                    if ui.button("New project…").clicked() {
+                        open_new = true;
+                        ui.close();
+                    }
+                    if ui.button("Open project…").clicked() {
+                        open_existing = true;
+                        ui.close();
                     }
                 });
-                ui.add_space(3.0);
-            }
-            // "+" is a square button with a hand-painted plus: the stock
-            // `menu_button` glyph is neither 1:1 nor optically centered.
-            let side = row_h;
-            let (resp, _) = egui::containers::menu::MenuButton::from_button(
-                egui::Button::new("").min_size(egui::vec2(side, side)),
-            )
-            .ui(ui, |ui| {
-                if ui.button("New project…").clicked() {
-                    open_new = true;
-                    ui.close();
-                }
-                if ui.button("Open project…").clicked() {
-                    open_existing = true;
-                    ui.close();
+                {
+                    let c = resp.rect.center();
+                    let arm = side * 0.26;
+                    let width = (side * 0.10).clamp(1.0, 2.2);
+                    let stroke =
+                        egui::Stroke::new(width, ui.style().interact(&resp).fg_stroke.color);
+                    let p = ui.painter();
+                    p.line_segment([c - egui::vec2(arm, 0.0), c + egui::vec2(arm, 0.0)], stroke);
+                    p.line_segment([c - egui::vec2(0.0, arm), c + egui::vec2(0.0, arm)], stroke);
                 }
             });
-            {
-                let c = resp.rect.center();
-                let arm = side * 0.26;
-                let width = (side * 0.10).clamp(1.0, 2.2);
-                let stroke = egui::Stroke::new(width, ui.style().interact(&resp).fg_stroke.color);
-                let p = ui.painter();
-                p.line_segment([c - egui::vec2(arm, 0.0), c + egui::vec2(arm, 0.0)], stroke);
-                p.line_segment([c - egui::vec2(0.0, arm), c + egui::vec2(0.0, arm)], stroke);
-            }
         });
-    });
     // Publish the bar's rect so the canvas ignores pointer input over it.
     ctx.data_mut(|d| {
         d.insert_persisted(

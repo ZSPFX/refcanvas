@@ -29,6 +29,7 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.
 - Industry standard hotkeys
 - Autosave, Undo and Redo [Z, CTRL+Y]
 - Hold thousands of images in one canvas (5,000+ OK!)
+- Touchscreen support (Surface devices)
 
 ## Technical Features
 

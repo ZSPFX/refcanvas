@@ -90,6 +90,34 @@ impl View {
         self.target_log_scale = log_scale.clamp(MIN_LOG_SCALE, MAX_LOG_SCALE);
         self.zoom_anchor = None;
     }
+
+    /// Pan by a drag in logical screen pixels (y down).
+    pub fn pan_pixels(&mut self, delta: Vec2, wpp: f64) {
+        if delta == Vec2::ZERO {
+            return;
+        }
+        let world_delta = DVec2::new(delta.x as f64, -(delta.y as f64)) * wpp;
+        self.center -= world_delta;
+        self.target_center = self.center;
+        // A manual pan overrides a pending zoom anchor.
+        self.zoom_anchor = None;
+        self.clamp_pan();
+    }
+
+    /// Zoom by a log-scale delta, optionally pinned at a screen anchor.
+    pub fn zoom_log(&mut self, dlog: f64, anchor: Option<Vec2>) {
+        self.target_log_scale = (self.target_log_scale + dlog).clamp(MIN_LOG_SCALE, MAX_LOG_SCALE);
+        self.zoom_anchor = anchor;
+    }
+
+    fn clamp_pan(&mut self) {
+        self.center = self
+            .center
+            .clamp(DVec2::splat(-PAN_CLAMP), DVec2::splat(PAN_CLAMP));
+        self.target_center = self
+            .target_center
+            .clamp(DVec2::splat(-PAN_CLAMP), DVec2::splat(PAN_CLAMP));
+    }
 }
 
 /// Tracks when the view last moved, so heavy work (freeing full-res textures
@@ -167,16 +195,21 @@ pub fn visible_world_rect(
     Some(Rect::from_corners(a, b))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn view_input(
     window: Single<&Window, With<PrimaryWindow>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     scroll: Res<AccumulatedMouseScroll>,
     camera: Single<(&Camera, &GlobalTransform)>,
+    pointer: Res<super::touch::Pointer>,
     mut view: ResMut<View>,
     mut contexts: EguiContexts,
 ) {
     let egui_busy = egui_pointer_busy(&mut contexts);
+    // Touch navigation is handled by `touch_input`; ignore the mouse while a
+    // touch is active, including the mouse events Windows promotes from touch.
+    let mouse_busy = pointer.touch_active || egui_busy;
 
     let cursor = window.cursor_position();
     let (camera, cam_transform) = *camera;
@@ -185,28 +218,23 @@ pub fn view_input(
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
 
     // ---- Zoom: mouse wheel (anchored at the cursor) ----
-    if !egui_busy && cursor.is_some() && scroll.delta.y != 0.0 {
+    if !mouse_busy && cursor.is_some() && scroll.delta.y != 0.0 {
         let delta = scroll.delta.y as f64;
-        view.target_log_scale = (view.target_log_scale - delta * ZOOM_WHEEL_SENSITIVITY)
-            .clamp(MIN_LOG_SCALE, MAX_LOG_SCALE);
-        view.zoom_anchor = cursor;
+        view.zoom_log(-delta * ZOOM_WHEEL_SENSITIVITY, cursor);
     }
 
     // ---- Zoom: Alt+RMB horizontal dolly ----
-    if !egui_busy && alt && mouse_buttons.pressed(MouseButton::Right) {
+    if !mouse_busy && alt && mouse_buttons.pressed(MouseButton::Right) {
         if let Some(c) = cursor {
             if let Some(prev) = view.dolly_prev_x {
                 let dx = c.x - prev;
                 if dx != 0.0 {
                     view.dolly_sign = Some(dx.signum());
                 }
-                view.target_log_scale = (view.target_log_scale - dx as f64 * ZOOM_DRAG_SENSITIVITY)
-                    .clamp(MIN_LOG_SCALE, MAX_LOG_SCALE);
+                let anchor = view.zoom_anchor.or(Some(c));
+                view.zoom_log(-dx as f64 * ZOOM_DRAG_SENSITIVITY, anchor);
             }
             view.dolly_prev_x = Some(c.x);
-            if view.zoom_anchor.is_none() {
-                view.zoom_anchor = Some(c);
-            }
         }
     } else {
         view.dolly_prev_x = None;
@@ -217,28 +245,16 @@ pub fn view_input(
     let space = keys.pressed(KeyCode::Space);
     let panning = mouse_buttons.pressed(MouseButton::Middle)
         || (space && mouse_buttons.pressed(MouseButton::Left));
-    if !egui_busy && panning {
+    if !mouse_busy && panning {
         if let Some(c) = cursor {
             if let Some(prev) = view.pan_prev_cursor {
-                let d = c - prev;
-                let world_delta = DVec2::new(d.x as f64, -(d.y as f64)) * wpp;
-                view.center -= world_delta;
-                view.target_center = view.center;
-                // A manual pan overrides a pending zoom anchor.
-                view.zoom_anchor = None;
+                view.pan_pixels(c - prev, wpp);
             }
             view.pan_prev_cursor = Some(c);
         }
     } else {
         view.pan_prev_cursor = None;
     }
-
-    view.center = view
-        .center
-        .clamp(DVec2::splat(-PAN_CLAMP), DVec2::splat(PAN_CLAMP));
-    view.target_center = view
-        .target_center
-        .clamp(DVec2::splat(-PAN_CLAMP), DVec2::splat(PAN_CLAMP));
 }
 
 /// Exponentially smooth the view toward its target and pin the zoom anchor.

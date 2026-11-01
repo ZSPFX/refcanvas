@@ -214,15 +214,7 @@ pub fn shortcuts(
             let z = min_z.min(ctx.zc.0) - 0.5;
             let tab_id = ctx.tabs.active_id().unwrap_or(0);
             let label = "Frame".to_string();
-            let e = frames::spawn_frame(
-                &mut commands,
-                tab_id,
-                true,
-                None,
-                label.clone(),
-                pose,
-                z,
-            );
+            let e = frames::spawn_frame(&mut commands, tab_id, true, None, label.clone(), pose, z);
             // Keep the previous selection (the framed nodes) instead of
             // selecting the new frame: the selection outline + handles are
             // drawn right at the frame's border, which with the tight padding

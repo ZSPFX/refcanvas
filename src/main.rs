@@ -82,7 +82,34 @@ fn frame_latency() -> NonZeroU32 {
     NonZeroU32::new(n.clamp(1, 16)).unwrap_or(NonZeroU32::MIN)
 }
 
+/// Windows' default 15.6 ms timer tick makes the 120 fps limiter oversleep,
+/// which caps drags near 40 fps. Ask for 1 ms resolution while the app runs.
+#[cfg(target_os = "windows")]
+struct TimerResolution;
+
+#[cfg(target_os = "windows")]
+impl TimerResolution {
+    fn acquire() -> Self {
+        unsafe {
+            windows_sys::Win32::Media::timeBeginPeriod(1);
+        }
+        Self
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for TimerResolution {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Media::timeEndPeriod(1);
+        }
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "windows")]
+    let _timer_resolution = TimerResolution::acquire();
+
     // Only allow one window per user at a time.
     let _instance = if instance::enabled() {
         match instance::acquire() {
@@ -189,7 +216,14 @@ fn main() {
 
     app.init_resource::<FramePacer>()
         .init_resource::<WindowResize>()
-        .add_systems(Update, (smooth_resize, idle_throttle, set_window_icon))
+        .add_systems(
+            Update,
+            (
+                smooth_resize,
+                idle_throttle.after(canvas::CanvasSet),
+                set_window_icon,
+            ),
+        )
         .add_systems(Last, limit_fps);
     app.run();
 }
@@ -263,9 +297,15 @@ impl Default for FramePacer {
 /// The limiter steps aside while the window is being resized (see
 /// [`smooth_resize`]): a sleeping loop answers resize steps late, which is
 /// exactly what makes live resizing judder.
-fn limit_fps(mut pacer: ResMut<FramePacer>, resize: Res<WindowResize>) {
-    if !pacer.cap_enabled || resize.is_active() {
-        // Benchmark mode, or a live resize: render as fast as we can.
+fn limit_fps(
+    mut pacer: ResMut<FramePacer>,
+    resize: Res<WindowResize>,
+    touch: Res<canvas::touch::Pointer>,
+    inertia: Res<canvas::touch::Inertia>,
+) {
+    if !pacer.cap_enabled || resize.is_active() || touch.touch_active || inertia.is_active() {
+        // Benchmark mode, a live resize, an active touch gesture, or a fling:
+        // render as fast as we can so drags never wait on the limiter.
         pacer.next_frame = None; // start a fresh interval when resuming
         return;
     }
@@ -322,6 +362,8 @@ fn idle_throttle(
     clipboard: Res<SystemClipboard>,
     pacer: Res<FramePacer>,
     resize: Res<WindowResize>,
+    touch: Res<canvas::touch::Pointer>,
+    inertia: Res<canvas::touch::Inertia>,
     loads: Query<(), With<FullLoadTask>>,
     nodes: Query<&CanvasNode, Without<canvas::node::InactiveTab>>,
     parking: Query<(), (With<Mesh2d>, With<canvas::node::InactiveTab>)>,
@@ -338,6 +380,8 @@ fn idle_throttle(
     // Benchmark mode is explicitly uncapped, and an in-flight clipboard
     // worker's result must be collected promptly.
     let busy = resize.is_active()
+        || touch.touch_active
+        || inertia.is_active()
         || import.is_active()
         || previews.is_active()
         || textures.has_pending()

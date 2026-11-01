@@ -7,6 +7,7 @@ use super::camera::{View, world_per_logical_px};
 use super::hit::{self, HitKind};
 use super::node::Pose;
 use super::selection::{self, Interaction, NodeQ, Selection};
+use super::touch::Pointer;
 
 /// Cursor matching a handle whose outward direction is `dir` (world space, y up).
 /// Rotated nodes therefore get correctly rotated diagonal cursors.
@@ -62,6 +63,7 @@ pub fn update_cursor(
     mut contexts: bevy_egui::EguiContexts,
     view: Res<View>,
     interaction: Res<Interaction>,
+    pointer: Res<Pointer>,
     selection: Res<Selection>,
     q: NodeQ,
 ) {
@@ -77,7 +79,10 @@ pub fn update_cursor(
     }
 
     let (camera, cam_tf) = *camera;
-    let icon = if crate::canvas::egui_pointer_busy(&mut contexts) {
+    let icon = if pointer.touch_active {
+        // Touch has no hover cursor; reset anything left from the mouse.
+        Some(SystemCursorIcon::Default)
+    } else if crate::canvas::egui_pointer_busy(&mut contexts) {
         // Over the HUD / menus: egui owns the cursor.
         None
     } else if view.is_panning() {

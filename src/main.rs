@@ -56,8 +56,48 @@ fn present_mode() -> PresentMode {
 /// Is winit on a native Wayland surface? It picks Wayland whenever
 /// `WAYLAND_DISPLAY` is set (an Xwayland session with that variable cleared
 /// counts as X11). Used to skip X11-only workarounds and the monitor hint.
-fn on_wayland() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some()
+pub(crate) fn on_wayland() -> bool {
+    match std::env::var("WINIT_UNIX_BACKEND").as_deref() {
+        Ok("x11") => false,
+        Ok("wayland") => true,
+        _ => std::env::var_os("WAYLAND_DISPLAY").is_some(),
+    }
+}
+
+/// Native Wayland has no always-on-top request for ordinary windows. When the
+/// preference is enabled, prefer the X11 compatibility backend if one is
+/// available; the X11 window manager can then honour the request.
+#[cfg(target_os = "linux")]
+fn prefer_x11_for_always_on_top() {
+    if !project::local::load_always_on_top() {
+        return;
+    }
+    let Some(display) = std::env::var_os("DISPLAY") else {
+        return;
+    };
+    if std::env::var_os("WAYLAND_DISPLAY").is_none()
+        || std::env::var_os("WINIT_UNIX_BACKEND").is_some()
+    {
+        return;
+    }
+    // A local DISPLAY normally means XWayland is available. If the socket is
+    // missing, forcing the X11 backend would only make startup fail.
+    let display = display.to_string_lossy();
+    if let Some(rest) = display.strip_prefix(':') {
+        let number = rest.split('.').next().unwrap_or("0");
+        let socket = format!("/tmp/.X11-unix/X{number}");
+        if !std::path::Path::new(&socket).exists() {
+            eprintln!(
+                "refcanvas: always-on-top needs X11 compatibility, but {socket} is missing"
+            );
+            return;
+        }
+    }
+    eprintln!("refcanvas: always-on-top enabled; using the X11 compatibility backend");
+    // SAFETY: this runs before Bevy or winit starts any threads.
+    unsafe {
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+    }
 }
 
 /// Swapchain images = this + 1. Override with `REF_FRAME_LATENCY=<n>`.
@@ -109,6 +149,9 @@ impl Drop for TimerResolution {
 fn main() {
     #[cfg(target_os = "windows")]
     let _timer_resolution = TimerResolution::acquire();
+
+    #[cfg(target_os = "linux")]
+    prefer_x11_for_always_on_top();
 
     // Only allow one window per user at a time.
     let _instance = if instance::enabled() {

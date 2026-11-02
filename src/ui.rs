@@ -1,12 +1,15 @@
 //! egui overlay: tab bar, context menus, status HUD.
 
+use bevy::ecs::system::NonSendMarker;
 use bevy::prelude::*;
 use bevy::time::Real;
 use bevy::window::PrimaryWindow;
+use bevy::winit::WINIT_WINDOWS;
 use bevy_egui::{
     EguiContexts, EguiPrimaryContextPass,
     egui::{self, LayerId, UiBuilder},
 };
+use winit::window::WindowLevel;
 
 use crate::canvas::camera::View;
 use crate::canvas::frames::{FrameLabelHits, FrameRename};
@@ -25,19 +28,60 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ContextMenu>().add_systems(
-            EguiPrimaryContextPass,
-            (
-                apply_accent_style,
-                context_menu_input,
-                tab_bar,
-                hud,
-                context_menu_ui,
-                frame_rename_ui,
-            )
-                .chain(),
-        );
+        app.init_resource::<ContextMenu>()
+            .init_resource::<AlwaysOnTop>()
+            .add_systems(Update, apply_always_on_top)
+            .add_systems(
+                EguiPrimaryContextPass,
+                (
+                    apply_accent_style,
+                    context_menu_input,
+                    tab_bar,
+                    hud,
+                    context_menu_ui,
+                    frame_rename_ui,
+                )
+                    .chain(),
+            );
     }
+}
+
+/// Whether the primary window should stay above other windows.
+#[derive(Resource)]
+pub struct AlwaysOnTop(pub bool);
+
+impl Default for AlwaysOnTop {
+    fn default() -> Self {
+        let supported = !crate::on_wayland();
+        Self(supported && crate::project::local::load_always_on_top())
+    }
+}
+
+/// Apply the window level on the main thread. On native Wayland winit has no
+/// always-on-top request; the preference is still saved so the next launch can
+/// use the X11 compatibility backend.
+fn apply_always_on_top(
+    _: NonSendMarker,
+    state: Res<AlwaysOnTop>,
+    mut applied: Local<Option<bool>>,
+) {
+    if *applied == Some(state.0) {
+        return;
+    }
+    WINIT_WINDOWS.with_borrow(|windows| {
+        if windows.windows.is_empty() {
+            return;
+        }
+        let level = if state.0 {
+            WindowLevel::AlwaysOnTop
+        } else {
+            WindowLevel::Normal
+        };
+        for window in windows.windows.values() {
+            window.set_window_level(level);
+        }
+        *applied = Some(state.0);
+    });
 }
 
 /// Our own right-click menu state (canvas interactions are not egui widgets).
@@ -825,10 +869,33 @@ fn frame_rename_ui(
 // Tab bar
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
+struct PinIcon {
+    texture: egui::TextureHandle,
+}
+
+fn pin_icon(ctx: &egui::Context) -> PinIcon {
+    let id = egui::Id::new("refcanvas_pin_icon");
+    if let Some(icon) = ctx.data(|data| data.get_temp::<PinIcon>(id)) {
+        return icon;
+    }
+    let image = image::load_from_memory(include_bytes!("../assets/icons/thumbtack-white.png"))
+        .expect("embedded thumbtack icon")
+        .into_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    let icon = PinIcon {
+        texture: ctx.load_texture("refcanvas_pin", color, egui::TextureOptions::LINEAR),
+    };
+    ctx.data_mut(|data| data.insert_temp(id, icon.clone()));
+    icon
+}
+
 fn tab_bar(
     mut contexts: EguiContexts,
     tabs: Res<Tabs>,
     mut requests: ResMut<TabRequests>,
+    mut always_on_top: ResMut<AlwaysOnTop>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let mut pending: Vec<TabRequest> = Vec::new();
@@ -899,32 +966,94 @@ fn tab_bar(
                     });
                     ui.add_space(3.0);
                 }
-                // "+" is a square button with a hand-painted plus: the stock
-                // `menu_button` glyph is neither 1:1 nor optically centered.
+                // Window controls live at the far right: the pin toggles
+                // always-on-top, and the "+" opens the project menu. The plus
+                // is hand-painted because the stock menu glyph is not 1:1 or
+                // optically centred.
                 let side = row_h;
-                let (resp, _) = egui::containers::menu::MenuButton::from_button(
-                    egui::Button::new("").min_size(egui::vec2(side, side)),
-                )
-                .ui(ui, |ui| {
-                    if ui.button("New project…").clicked() {
-                        open_new = true;
-                        ui.close();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Keep both window buttons the same size in every pointer
+                    // state. egui's default hovered/active visuals carry a
+                    // stroked frame, which shrinks the content by a pixel per
+                    // side and makes the whole row grow when the pointer
+                    // leaves.
+                    let visuals = ui.visuals_mut();
+                    visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                    visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+                    visuals.widgets.hovered.expansion = 0.0;
+                    visuals.widgets.active.expansion = 0.0;
+
+                    let wayland = crate::on_wayland();
+                    let can_pin = !wayland || std::env::var_os("DISPLAY").is_some();
+                    let icon = pin_icon(ctx);
+                    let button = egui::Button::new("").min_size(egui::vec2(side, side));
+                    let button = if always_on_top.0 {
+                        button
+                            .fill(egui::Color32::WHITE)
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(210)))
+                    } else {
+                        button
+                    };
+                    let pin_resp = ui.add_enabled(can_pin, button);
+                    let tint = if !pin_resp.enabled() {
+                        ui.visuals().weak_text_color()
+                    } else if always_on_top.0 {
+                        egui::Color32::from_gray(25)
+                    } else {
+                        ui.style().interact(&pin_resp).fg_stroke.color
+                    };
+                    let icon_rect = egui::Rect::from_center_size(
+                        pin_resp.rect.center(),
+                        egui::vec2(side * 0.54, side * 0.54),
+                    );
+                    ui.painter().image(
+                        icon.texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        tint,
+                    );
+                    let pin_resp = pin_resp.on_hover_text(if !can_pin {
+                        "Always on top is not available on native Wayland"
+                    } else if wayland {
+                        "Always on top\nRestart to apply on Wayland"
+                    } else {
+                        "Always on top"
+                    });
+                    if pin_resp.clicked() {
+                        always_on_top.0 = !always_on_top.0;
+                        crate::project::local::save_always_on_top(always_on_top.0);
                     }
-                    if ui.button("Open project…").clicked() {
-                        open_existing = true;
-                        ui.close();
+
+                    let (resp, _) = egui::containers::menu::MenuButton::from_button(
+                        egui::Button::new("").min_size(egui::vec2(side, side)),
+                    )
+                    .ui(ui, |ui| {
+                        if ui.button("New project…").clicked() {
+                            open_new = true;
+                            ui.close();
+                        }
+                        if ui.button("Open project…").clicked() {
+                            open_existing = true;
+                            ui.close();
+                        }
+                    });
+                    {
+                        let c = resp.rect.center();
+                        let arm = side * 0.26;
+                        let width = (side * 0.10).clamp(1.0, 2.2);
+                        let stroke =
+                            egui::Stroke::new(width, ui.style().interact(&resp).fg_stroke.color);
+                        let p = ui.painter();
+                        p.line_segment(
+                            [c - egui::vec2(arm, 0.0), c + egui::vec2(arm, 0.0)],
+                            stroke,
+                        );
+                        p.line_segment(
+                            [c - egui::vec2(0.0, arm), c + egui::vec2(0.0, arm)],
+                            stroke,
+                        );
                     }
                 });
-                {
-                    let c = resp.rect.center();
-                    let arm = side * 0.26;
-                    let width = (side * 0.10).clamp(1.0, 2.2);
-                    let stroke =
-                        egui::Stroke::new(width, ui.style().interact(&resp).fg_stroke.color);
-                    let p = ui.painter();
-                    p.line_segment([c - egui::vec2(arm, 0.0), c + egui::vec2(arm, 0.0)], stroke);
-                    p.line_segment([c - egui::vec2(0.0, arm), c + egui::vec2(0.0, arm)], stroke);
-                }
             });
         });
     // Publish the bar's rect so the canvas ignores pointer input over it.

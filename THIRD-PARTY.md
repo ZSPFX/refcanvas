@@ -21,6 +21,13 @@ under their own licenses, reproduced/referenced here for binary redistribution.
 | windows-sys | MIT OR Apache-2.0 |
 | [winit](https://github.com/rust-windowing/winit) (vendored in `vendor/winit`) | Apache-2.0 |
 
+## Bundled icons
+
+- `assets/icons/thumbtack-solid-full.svg` and the derived
+  `assets/icons/thumbtack-white.png` are from **Font Awesome Free 7.3.1**
+  (thumbtack icon), licensed CC BY 4.0. Copyright Fonticons, Inc.
+  Source and license: <https://fontawesome.com/license/free>.
+
 ## Bundled fonts
 
 - `epaint_default_fonts` (pulled in by `bevy_egui`) is licensed

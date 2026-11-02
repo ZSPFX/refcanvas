@@ -134,6 +134,43 @@ fn write_json<T: Serialize>(path: &Path, value: &T) {
 }
 
 // ---------------------------------------------------------------------------
+// Window preferences
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct UiPrefs {
+    #[serde(default)]
+    always_on_top: bool,
+}
+
+fn prefs_path() -> Option<PathBuf> {
+    data_root().map(|root| root.join("ui.json"))
+}
+
+pub fn load_always_on_top() -> bool {
+    let Some(path) = prefs_path() else {
+        return false;
+    };
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<UiPrefs>(&bytes).ok())
+        .map(|prefs| prefs.always_on_top)
+        .unwrap_or(false)
+}
+
+pub fn save_always_on_top(on_top: bool) {
+    let Some(path) = prefs_path() else {
+        return;
+    };
+    write_json(
+        &path,
+        &UiPrefs {
+            always_on_top: on_top,
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Project path key
 // ---------------------------------------------------------------------------
 

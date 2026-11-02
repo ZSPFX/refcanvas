@@ -29,6 +29,7 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.
 - Hold thousands of images in one canvas (5,000+ OK!)
 - Touchscreen support (Surface devices)
 - Support shared folder, multiple artists viewing/editing at the same time
+- Always-on-top pin for keeping references above other apps
 
 ## Technical Features
 

@@ -988,9 +988,7 @@ fn tab_bar(
                     let icon = pin_icon(ctx);
                     let button = egui::Button::new("").min_size(egui::vec2(side, side));
                     let button = if always_on_top.0 {
-                        button
-                            .fill(egui::Color32::WHITE)
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(210)))
+                        button.fill(egui::Color32::WHITE)
                     } else {
                         button
                     };

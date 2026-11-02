@@ -8,8 +8,6 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.
 
 ## Design Goals
 
-> I wanted a fast local canvas for reference images, and most note-taking apps stutter once you load thousands of them — so I built one for my own work as a 3D Generalist.
-
 - Butterly smooth performance on canvas with thousands of images
 - Gizmos and interactions that felt just right
 - Free up VRAM whenever possible (More memory for DCC)

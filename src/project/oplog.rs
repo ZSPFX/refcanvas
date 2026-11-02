@@ -311,14 +311,15 @@ impl MergeState {
 
 pub struct Journal {
     path: PathBuf,
-    file: File,
     device: String,
     session: String,
 }
 
 impl Journal {
-    /// Create this session's journal. Owners are the only writers, so a new
-    /// random session name is enough to avoid two machines targeting a file.
+    /// Create this session's (empty) journal and close it immediately. Keeping
+    /// the name visible from startup lets peers discover the session without
+    /// waiting for a directory-cache refresh, while no handle is held between
+    /// batches.
     pub fn create(dir: &Path, device: &str) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
         let safe: String = device
@@ -330,12 +331,11 @@ impl Journal {
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
-            .read(true)
             .open(&path)
             .with_context(|| format!("creating journal {path:?}"))?;
+        drop(file);
         Ok(Self {
             path,
-            file,
             device: safe,
             session,
         })
@@ -358,10 +358,17 @@ impl Journal {
         };
         let mut line = serde_json::to_vec(&batch)?;
         line.push(b'\n');
-        // One write call per batch so a synced file never contains half a line
-        // in the middle of the stream; the reader tolerates a partial tail.
-        self.file.write_all(&line)?;
-        self.file.sync_data()?;
+        // Open/write/close for every batch. A long-lived handle on a network
+        // share can hold a lease that keeps metadata and the appended data
+        // invisible to other clients until the process exits.
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("opening journal {:?}", self.path))?;
+        file.write_all(&line)?;
+        file.sync_data()?;
+        drop(file);
         Ok(true)
     }
 }
@@ -457,29 +464,25 @@ fn read_journals(
             continue;
         }
         let key = format!("journal/{name}");
-        let Ok(meta) = std::fs::metadata(&path) else {
-            marks.remove(&key);
-            continue;
-        };
-        let len = meta.len();
-        let mtime = mtime_ns(&meta);
         let mark = marks.get(&key).copied();
-        if mark.is_some_and(|m| m.len == len && m.mtime_ns == mtime) {
-            continue;
-        }
-        let head = head_hash(&path).unwrap_or(0);
-        let replaced = mark.is_some_and(|m| m.head != 0 && m.head != head);
-        let start = match mark {
-            Some(m) if !replaced && len >= m.len => m.len,
-            _ => 0,
-        };
-
+        // Open every poll instead of trusting cached size/mtime. Network
+        // filesystems can report stale metadata for a file another client is
+        // writing; the open/fstat/read path is what forces revalidation.
         let mut file = match File::open(&path) {
             Ok(file) => file,
             Err(err) => {
                 warn!("journal open failed ({}): {err}", path.display());
                 continue;
             }
+        };
+        let Ok(meta) = file.metadata() else {
+            continue;
+        };
+        let len = meta.len();
+        let mtime = mtime_ns(&meta);
+        let start = match mark {
+            Some(m) if len >= m.len => m.len,
+            _ => 0,
         };
         if start > 0 {
             let _ = file.seek(SeekFrom::Start(start));
@@ -520,7 +523,7 @@ fn read_journals(
             FileMark {
                 len: start + consumed,
                 mtime_ns: mtime,
-                head,
+                head: 0,
             },
         );
     }
@@ -901,6 +904,30 @@ mod tests {
             a_state.nodes[&contested].node,
             b_state.nodes[&contested].node
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn journal_file_is_created_empty_and_closed_between_batches() {
+        let root = std::env::temp_dir().join(format!(
+            "refcanvas-lazy-journal-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dir = root.join("journal");
+        let mut journal = Journal::create(&dir, "dev").unwrap();
+        assert!(journal.path().is_file());
+        assert_eq!(std::fs::metadata(journal.path()).unwrap().len(), 0);
+        let mut c = clock("dev");
+        journal
+            .append(vec![Op {
+                id: Uuid::now_v7(),
+                rev: c.tick(),
+                deleted: false,
+                node: Some(node(1.0)),
+            }])
+            .unwrap();
+        assert!(std::fs::metadata(journal.path()).unwrap().len() > 0);
         let _ = std::fs::remove_dir_all(root);
     }
 

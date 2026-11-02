@@ -90,6 +90,9 @@ anyhow = "1"
 # Version- and feature-matched with Bevy's own winit dependency (which
 # [patch.crates-io] at the bottom already redirects to vendor/winit).
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+# Startup release check: one GitHub API request + semantic version compare.
+ureq = "3"
+semver = "1"
 
 # Reveal-in-Explorer needs the shell API (`SHOpenFolderAndSelectItems`):
 # explorer.exe's `/select,` command line is unreliable. Version-matched with

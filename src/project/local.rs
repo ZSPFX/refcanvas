@@ -21,12 +21,12 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(not(test))]
-fn data_root() -> Option<PathBuf> {
+pub(crate) fn data_root() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.data_dir().join("refcanvas"))
 }
 
 #[cfg(test)]
-fn data_root() -> Option<PathBuf> {
+pub(crate) fn data_root() -> Option<PathBuf> {
     None
 }
 
@@ -108,7 +108,7 @@ pub fn save_clock(clock: &Clock) {
     write_json(&path, &file);
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) {
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
 

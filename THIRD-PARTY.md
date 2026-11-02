@@ -18,6 +18,8 @@ under their own licenses, reproduced/referenced here for binary redistribution.
 | [directories](https://github.com/dirs-dev/directories-rs) | MIT OR Apache-2.0 |
 | [serde](https://serde.rs) / serde_json | MIT OR Apache-2.0 |
 | [anyhow](https://github.com/dtolnay/anyhow) | MIT OR Apache-2.0 |
+| [ureq](https://github.com/algesten/ureq) | MIT OR Apache-2.0 |
+| [semver](https://github.com/dtolnay/semver) | MIT OR Apache-2.0 |
 | windows-sys | MIT OR Apache-2.0 |
 | [winit](https://github.com/rust-windowing/winit) (vendored in `vendor/winit`) | Apache-2.0 |
 

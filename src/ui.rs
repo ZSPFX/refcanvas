@@ -1104,6 +1104,7 @@ fn hud(
     view: Res<View>,
     selection: Res<Selection>,
     queue: Res<ImportQueue>,
+    update: Res<crate::update::UpdateStatus>,
     real: Res<Time<Real>>,
     mut pacer: ResMut<crate::FramePacer>,
     mut fps: Local<FpsCounter>,
@@ -1199,7 +1200,22 @@ fn hud(
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                ui.label(text(format!("v{}", env!("CARGO_PKG_VERSION"))).weak());
+                if let Some(badge) = update.badge_text() {
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(255, 210, 0))
+                        .corner_radius(0)
+                        .inner_margin(egui::Margin::symmetric(4, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(badge)
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(egui::Color32::BLACK),
+                            );
+                        });
+                } else {
+                    ui.label(text(format!("v{}", env!("CARGO_PKG_VERSION"))).weak());
+                }
                 if !selection.nodes.is_empty() && selection.nodes.len() > 1 {
                     ui.label(text(format!("{} selected", selection.nodes.len())).weak());
                 }

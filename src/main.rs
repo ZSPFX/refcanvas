@@ -6,6 +6,7 @@ mod instance;
 mod project;
 mod theme;
 mod ui;
+mod update;
 
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
@@ -245,6 +246,7 @@ fn main() {
         project::ProjectPlugin,
         clipboard::ClipboardPlugin,
         ThemePlugin,
+        update::UpdatePlugin,
     ));
 
     // Dev helper: `refcanvas --import <folder>`

@@ -55,9 +55,10 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.
 - Compare A/B test slider
 - Arrangement compaction
 - Change frame color
-- Notify new version release
 
 ## Download & Installation
+
+> When there's a new version the app will let you know.
 
 ### Linux
 

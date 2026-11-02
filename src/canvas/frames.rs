@@ -10,6 +10,7 @@ use super::camera::View;
 use super::hit::{self, point_inside};
 use super::node::{InactiveTab, CanvasNode, FrameLabel, FrameNode, NodeKind, Pose, TabOwner};
 use super::selection::NodeQ;
+use crate::project::oplog::NodeId;
 use crate::project::tabs::Tabs;
 use crate::theme::Accent;
 
@@ -73,7 +74,7 @@ pub fn spawn_frame(
     commands: &mut Commands,
     tab_id: u64,
     visible: bool,
-    db_id: Option<i64>,
+    node_id: Option<NodeId>,
     label: String,
     pose: Pose,
     z: f32,
@@ -81,7 +82,7 @@ pub fn spawn_frame(
     let frame = commands
         .spawn((
             CanvasNode {
-                db_id,
+                node_id,
                 kind: NodeKind::Frame(FrameNode {
                     label: label.clone(),
                 }),
@@ -105,19 +106,25 @@ pub fn spawn_frame(
         ))
         .id();
 
-    commands.spawn((
-        Text2d::new(label),
-        TextFont {
-            font_size: bevy::text::FontSize::Px(LABEL_FONT_SIZE),
-            ..default()
-        },
-        TextColor(Color::NONE),
-        Anchor::BOTTOM_LEFT,
-        Transform::default(),
-        FrameLabel(frame),
-        TabOwner(tab_id),
-        ChildOf(frame),
-    ));
+    let label_entity = commands
+        .spawn((
+            Text2d::new(label),
+            TextFont {
+                font_size: bevy::text::FontSize::Px(LABEL_FONT_SIZE),
+                ..default()
+            },
+            TextColor(Color::NONE),
+            Anchor::BOTTOM_LEFT,
+            Transform::default(),
+            FrameLabel(frame),
+            TabOwner(tab_id),
+            ChildOf(frame),
+        ))
+        .id();
+    if !visible {
+        commands.entity(frame).insert(InactiveTab);
+        commands.entity(label_entity).insert(InactiveTab);
+    }
     frame
 }
 

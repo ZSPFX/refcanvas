@@ -4,6 +4,8 @@ use bevy::prelude::*;
 use bevy::tasks::Task;
 use std::path::PathBuf;
 
+use crate::project::oplog::NodeId;
+
 /// Images larger than this are scaled down when first placed (world units).
 pub const MAX_DISPLAY_DIM: f32 = 512.0;
 
@@ -38,8 +40,8 @@ pub struct NodeSnapshot {
 
 #[derive(Component)]
 pub struct CanvasNode {
-    /// Row id in the project db; `None` until first persisted.
-    pub db_id: Option<i64>,
+    /// Stable operation-log id; `None` until first persisted.
+    pub node_id: Option<NodeId>,
     pub kind: NodeKind,
     /// Displayed size in world units.
     pub size: Vec2,

@@ -359,6 +359,7 @@ fn idle_throttle(
     previews: Res<PreviewLoader>,
     textures: Res<canvas::lod::GpuTextureState>,
     tab_requests: Res<project::tabs::TabRequests>,
+    tabs: Res<project::tabs::Tabs>,
     clipboard: Res<SystemClipboard>,
     pacer: Res<FramePacer>,
     resize: Res<WindowResize>,
@@ -387,6 +388,7 @@ fn idle_throttle(
         || textures.has_pending()
         || nodes.iter().any(node_texture_pending)
         || !tab_requests.queue.is_empty()
+        || project::sync::has_pending(&tabs)
         || clipboard.is_active()
         || !loads.is_empty()
         || !parking.is_empty()

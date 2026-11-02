@@ -4,8 +4,10 @@ use crate::canvas::{
     node::{CanvasNode, FrameLabel},
     undo::UndoEntry,
 };
+use crate::project::oplog::{Clock, Journal, Op, SavedNode};
 use bevy::ecs::system::RunSystemOnce;
 use std::sync::atomic::{AtomicU64, Ordering};
+use uuid::Uuid;
 
 static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
 
@@ -22,26 +24,55 @@ impl Fixture {
             NEXT_TEST.fetch_add(1, Ordering::Relaxed)
         ));
         let mut tabs = Tabs::default();
+        let mut clock = Clock::new("test-device".to_string(), 0, 0);
         for (id, count) in [(0, 3), (1, 5)] {
             let path = root.join(id.to_string());
-            let tab = open_tab_at(&path, id).unwrap();
+            let store = ProjectStore { root: path.clone() };
+            store.ensure_dirs().unwrap();
             image::RgbaImage::new(16, 16)
-                .save(path.join("images/test.png"))
+                .save(store.images_dir().join("test.png"))
                 .unwrap();
-            let db = rusqlite::Connection::open(tab.store.db_path()).unwrap();
+            let mut journal = Journal::create(&store.journal_dir(), "seed").unwrap();
+            let mut ops = Vec::new();
             for index in 0..count {
-                db.execute(
-                    "INSERT INTO nodes (x,y,w,h,z,src,hash,img_w,img_h) VALUES (?1,0,16,16,?1,'images/test.png','test',16,16)",
-                    [index],
-                ).unwrap();
+                ops.push(Op {
+                    id: Uuid::now_v7(),
+                    rev: clock.tick(),
+                    deleted: false,
+                    node: Some(SavedNode {
+                        kind: "image".to_string(),
+                        x: index as f32,
+                        y: 0.0,
+                        w: 16.0,
+                        h: 16.0,
+                        z: index as f32,
+                        src: Some("images/test.png".to_string()),
+                        hash: Some("test".to_string()),
+                        img_w: Some(16),
+                        img_h: Some(16),
+                        ..Default::default()
+                    }),
+                });
             }
-            db.execute(
-                "INSERT INTO nodes (kind,x,y,w,h,label) VALUES ('frame',0,0,100,100,'Frame')",
-                [],
-            )
-            .unwrap();
+            ops.push(Op {
+                id: Uuid::now_v7(),
+                rev: clock.tick(),
+                deleted: false,
+                node: Some(SavedNode {
+                    kind: "frame".to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                    label: Some("Frame".to_string()),
+                    ..Default::default()
+                }),
+            });
+            journal.append(ops).unwrap();
+            let tab = open_tab_at(&path, id, &mut clock).unwrap();
             tabs.stored.push(tab);
         }
+        tabs.clock = clock;
         tabs.next_id = 2;
         let mut app = App::new();
         super::super::configure_tab_switching(&mut app);
@@ -56,6 +87,9 @@ impl Fixture {
             .init_resource::<Interaction>()
             .init_resource::<UndoStack>()
             .init_resource::<ImportQueue>()
+            .init_resource::<Time>()
+            .init_resource::<super::super::sync::SyncTimer>()
+            .init_resource::<super::super::sync::PathProbe>()
             .add_systems(
                 PostUpdate,
                 |mut commands: Commands, sprites: Query<Entity, Added<Sprite>>| {
@@ -159,7 +193,7 @@ fn switching_saves_edits_and_restores_camera_undo_and_imports() {
         .world()
         .get::<CanvasNode>(entity)
         .unwrap()
-        .db_id
+        .node_id
         .unwrap();
     f.app
         .world_mut()
@@ -184,12 +218,19 @@ fn switching_saves_edits_and_restores_camera_undo_and_imports() {
     assert!(!f.app.world().resource::<ImportQueue>().is_active());
     let first = &f.app.world().resource::<Tabs>().stored[0];
     assert!(first.imports.is_active());
-    let saved = first.db.load().unwrap();
     assert_eq!(
-        saved.nodes.iter().find(|n| n.id == row_id).unwrap().saved.x,
+        first
+            .merge
+            .nodes
+            .get(&row_id)
+            .unwrap()
+            .node
+            .as_ref()
+            .unwrap()
+            .x,
         1234.0
     );
-    assert_eq!(saved.view, Some((12.0, 34.0, 0.0)));
+    assert_eq!(first.view.0, DVec2::new(12.0, 34.0));
 
     f.request(TabRequest::Switch(0));
     assert_eq!(f.app.world().resource::<UndoStack>().past.len(), 1);
@@ -206,15 +247,9 @@ fn closing_an_unopened_tab_does_not_delete_its_rows() {
     f.request(TabRequest::Switch(0));
     f.request(TabRequest::Close(1));
     assert_eq!(f.app.world().resource::<Tabs>().active_id(), Some(0));
-    assert_eq!(
-        ProjectDb::open(&f.root.join("1/project.db"))
-            .unwrap()
-            .load()
-            .unwrap()
-            .nodes
-            .len(),
-        6
-    );
+    let mut clock = Clock::new("reopen".to_string(), 0, 0);
+    let reopened = open_tab_at(&f.root.join("1"), 99, &mut clock).unwrap();
+    assert_eq!(reopened.merge.nodes.len(), 6);
     assert!(f.nodes(1).is_empty());
 }
 
@@ -228,7 +263,7 @@ fn closing_active_tab_saves_latest_edits_before_loading_neighbor() {
         .world()
         .get::<CanvasNode>(entity)
         .unwrap()
-        .db_id
+        .node_id
         .unwrap();
     f.app
         .world_mut()
@@ -240,12 +275,18 @@ fn closing_active_tab_saves_latest_edits_before_loading_neighbor() {
     assert_eq!(f.app.world().resource::<Tabs>().active_id(), Some(1));
     assert_eq!(f.active_count(), 6);
     assert!(f.nodes(0).is_empty());
-    let saved = ProjectDb::open(&f.root.join("0/project.db"))
-        .unwrap()
-        .load()
-        .unwrap();
+    let mut clock = Clock::new("reopen".to_string(), 0, 0);
+    let reopened = open_tab_at(&f.root.join("0"), 99, &mut clock).unwrap();
     assert_eq!(
-        saved.nodes.iter().find(|n| n.id == row_id).unwrap().saved.x,
+        reopened
+            .merge
+            .nodes
+            .get(&row_id)
+            .unwrap()
+            .node
+            .as_ref()
+            .unwrap()
+            .x,
         987.0
     );
 }
@@ -264,12 +305,7 @@ fn queued_switches_wait_for_spawns_before_saving() {
     f.app.update();
     assert_eq!(f.app.world().resource::<Tabs>().active_id(), Some(0));
     assert_eq!(
-        f.app.world().resource::<Tabs>().stored[1]
-            .db
-            .load()
-            .unwrap()
-            .nodes
-            .len(),
+        f.app.world().resource::<Tabs>().stored[1].merge.nodes.len(),
         6
     );
 }
@@ -330,12 +366,7 @@ fn unloaded_tab_is_not_saved_as_an_empty_project() {
         save_active(&mut tabs, &view, &mut nodes);
     }).unwrap();
     assert_eq!(
-        f.app.world().resource::<Tabs>().stored[0]
-            .db
-            .load()
-            .unwrap()
-            .nodes
-            .len(),
+        f.app.world().resource::<Tabs>().stored[0].merge.nodes.len(),
         4
     );
 }
@@ -376,24 +407,38 @@ fn startup_only_loads_remembered_active_tab_even_after_a_missing_path() {
             },
         )
         .unwrap();
-    assert_eq!(f.app.world().resource::<Tabs>().len(), 2);
-    assert!(!f.app.world().resource::<Tabs>().stored[0].loaded);
-    assert!(f.app.world().resource::<Tabs>().stored[1].loaded);
-    assert!(f.nodes(0).is_empty());
-    assert_eq!(f.nodes(1).len(), 6);
+    let (first_id, second_id, len, unavailable, first_loaded, second_loaded) = {
+        let tabs = f.app.world().resource::<Tabs>();
+        (
+            tabs.stored[0].id,
+            tabs.stored[1].id,
+            tabs.len(),
+            tabs.unavailable.len(),
+            tabs.stored[0].loaded,
+            tabs.stored[1].loaded,
+        )
+    };
+    assert_eq!(len, 2);
+    assert_eq!(unavailable, 1);
+    assert!(!first_loaded);
+    assert!(second_loaded);
+    assert!(f.nodes(first_id).is_empty());
+    assert_eq!(f.nodes(second_id).len(), 6);
     assert_eq!(f.active_count(), 6);
 }
 
 #[test]
-fn failed_activation_leaves_current_tab_usable() {
+fn a_project_that_cannot_be_opened_is_not_added() {
     let mut f = Fixture::new();
     f.request(TabRequest::Switch(0));
-    let db = rusqlite::Connection::open(f.root.join("1/project.db")).unwrap();
-    db.execute("DROP TABLE nodes", []).unwrap();
-    f.request(TabRequest::Switch(1));
+    let bad = f.root.join("bad");
+    std::fs::create_dir_all(&bad).unwrap();
+    // A regular file where a directory must be makes opening fail.
+    std::fs::write(bad.join("journal"), b"not a directory").unwrap();
+    f.request(TabRequest::Open(bad));
     assert_eq!(f.app.world().resource::<Tabs>().active_id(), Some(0));
+    assert_eq!(f.app.world().resource::<Tabs>().len(), 2);
     assert_eq!(f.active_count(), 4);
-    assert!(!f.app.world().resource::<Tabs>().stored[1].loaded);
 }
 
 #[test]
@@ -415,18 +460,8 @@ fn tab_camera_matches_new_images_on_the_first_frame() {
             Projection::Orthographic(OrthographicProjection::default_2d()),
         ))
         .id();
-    let db = rusqlite::Connection::open(f.root.join("1/project.db")).unwrap();
-    for (key, value) in [
-        ("view_x", "12000"),
-        ("view_y", "-8000"),
-        ("view_log_scale", "5"),
-    ] {
-        db.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-            [key, value],
-        )
-        .unwrap();
-    }
+    // Give the second tab a camera position in local state before switching.
+    f.app.world_mut().resource_mut::<Tabs>().stored[1].view = (DVec2::new(12000.0, -8000.0), 5.0);
 
     f.request(TabRequest::Switch(0));
     {
@@ -464,6 +499,168 @@ fn tab_camera_matches_new_images_on_the_first_frame() {
                     == Some(&Visibility::Inherited))
         );
     }
+}
+
+#[test]
+fn remote_edits_apply_without_echoing_a_local_op() {
+    let mut f = Fixture::new();
+    f.request(TabRequest::Switch(0));
+    let entity = f
+        .nodes(0)
+        .into_iter()
+        .find(|entity| {
+            f.app
+                .world()
+                .get::<CanvasNode>(*entity)
+                .unwrap()
+                .image()
+                .is_some()
+        })
+        .unwrap();
+    let node_id = f
+        .app
+        .world()
+        .get::<CanvasNode>(entity)
+        .unwrap()
+        .node_id
+        .unwrap();
+
+    let store = ProjectStore {
+        root: f.root.join("0"),
+    };
+    let mut clock = Clock::new("remote-device".to_string(), 0, 0);
+    let mut journal = Journal::create(&store.journal_dir(), clock.device_id()).unwrap();
+    journal
+        .append(vec![Op {
+            id: node_id,
+            rev: clock.tick(),
+            deleted: false,
+            node: Some(SavedNode {
+                kind: "image".to_string(),
+                x: 500.0,
+                y: 0.0,
+                w: 16.0,
+                h: 16.0,
+                z: 0.0,
+                src: Some("images/test.png".to_string()),
+                hash: Some("test".to_string()),
+                img_w: Some(16),
+                img_h: Some(16),
+                ..Default::default()
+            }),
+        }])
+        .unwrap();
+
+    let tab = &mut f.app.world_mut().resource_mut::<Tabs>().stored[0];
+    let changes =
+        crate::project::oplog::read_project(&store.root, &mut tab.merge, &mut tab.files).unwrap();
+    tab.pending.extend(changes);
+
+    f.app.update();
+    assert_eq!(
+        f.app
+            .world()
+            .get::<Transform>(entity)
+            .unwrap()
+            .translation
+            .x,
+        500.0
+    );
+
+    // Applying remote state must not make the local diff emit it back.
+    let journal_path = f.app.world().resource::<Tabs>().stored[0]
+        .journal
+        .path()
+        .to_path_buf();
+    let before = std::fs::metadata(&journal_path).unwrap().len();
+    f.app
+        .world_mut()
+        .run_system_once(
+            |mut tabs: ResMut<Tabs>,
+             view: Res<View>,
+             mut nodes: Query<(Entity, &Transform, &mut CanvasNode, &Sprite, &TabOwner)>| {
+                save_active(&mut tabs, &view, &mut nodes);
+            },
+        )
+        .unwrap();
+    let after = std::fs::metadata(&journal_path).unwrap().len();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn remote_tombstone_removes_a_live_node() {
+    let mut f = Fixture::new();
+    f.request(TabRequest::Switch(0));
+    let entity = f.nodes(0)[0];
+    let node_id = f
+        .app
+        .world()
+        .get::<CanvasNode>(entity)
+        .unwrap()
+        .node_id
+        .unwrap();
+    let store = ProjectStore {
+        root: f.root.join("0"),
+    };
+    let mut clock = Clock::new("remote-device".to_string(), 100, 0);
+    let mut journal = Journal::create(&store.journal_dir(), clock.device_id()).unwrap();
+    journal
+        .append(vec![Op {
+            id: node_id,
+            rev: clock.tick(),
+            deleted: true,
+            node: None,
+        }])
+        .unwrap();
+
+    let tab = &mut f.app.world_mut().resource_mut::<Tabs>().stored[0];
+    let changes =
+        crate::project::oplog::read_project(&store.root, &mut tab.merge, &mut tab.files).unwrap();
+    tab.pending.extend(changes);
+    f.app.update();
+    assert!(f.app.world().get_entity(entity).is_err());
+}
+
+#[test]
+fn legacy_database_migrates_once_and_ignores_the_old_camera() {
+    let root = std::env::temp_dir().join(format!(
+        "refcanvas-legacy-{}-{}",
+        std::process::id(),
+        NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+    ));
+    let path = root.join("legacy");
+    let store = ProjectStore { root: path.clone() };
+    store.ensure_dirs().unwrap();
+    image::RgbaImage::new(16, 16)
+        .save(store.images_dir().join("test.png"))
+        .unwrap();
+    {
+        let db = rusqlite::Connection::open(store.db_path()).unwrap();
+        db.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE nodes (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 kind TEXT NOT NULL DEFAULT 'image',
+                 x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
+                 rot REAL NOT NULL DEFAULT 0, z REAL NOT NULL DEFAULT 0,
+                 src TEXT, orig_name TEXT, hash TEXT, img_w INTEGER, img_h INTEGER,
+                 flip_x INTEGER NOT NULL DEFAULT 0, flip_y INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO meta VALUES ('view_x','12000'),('view_y','-8000'),('view_log_scale','5');
+             INSERT INTO nodes (x,y,w,h,z,src,hash,img_w,img_h)
+                 VALUES (42,0,16,16,0,'images/test.png','test',16,16);",
+        )
+        .unwrap();
+    }
+
+    let mut clock = Clock::new("migrator".to_string(), 0, 0);
+    let first = open_tab_at(&path, 1, &mut clock).unwrap();
+    assert_eq!(first.merge.nodes.len(), 1);
+    assert_eq!(first.view, (DVec2::ZERO, 0.0));
+
+    // A second open sees the journal and must not import the same row again.
+    let second = open_tab_at(&path, 2, &mut clock).unwrap();
+    assert_eq!(second.merge.nodes.len(), 1);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

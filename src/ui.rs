@@ -944,12 +944,11 @@ fn tab_bar(
         }
     }
     if open_existing {
-        if let Some(file) = rfd::FileDialog::new()
-            .set_title("Open project")
-            .add_filter("refcanvas project", &["db"])
-            .pick_file()
+        if let Some(dir) = rfd::FileDialog::new()
+            .set_title("Open project: choose a folder")
+            .pick_folder()
         {
-            pending.push(TabRequest::Open(file));
+            pending.push(TabRequest::Open(dir));
         }
     }
 

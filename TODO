@@ -1,2 +1,1 @@
-- Warn version mismatched from Sqllite database file. (Multiple artists not on the same version)
-- Locked file by default, unlock with top right lock icon (Changes conflicts)
+- Warn when a journal/checkpoint was written by a newer format version (mixed app versions).

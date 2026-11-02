@@ -30,6 +30,7 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.
 - Autosave, Undo and Redo [Z, CTRL+Y]
 - Hold thousands of images in one canvas (5,000+ OK!)
 - Touchscreen support (Surface devices)
+- Support shared folder, multiple artists viewing/editing at the same time
 
 ## Technical Features
 
@@ -56,7 +57,6 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.
 - Arrangement compaction
 - Change frame color
 - Notify new version release
-- DB Lock
 
 ## Download & Installation
 

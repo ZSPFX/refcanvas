@@ -1,9 +1,9 @@
-//! Per-tab persistence: loading a project into the ECS, streaming preview
-//! textures, and autosaving.
+//! Per-tab persistence: loading merged state into the ECS, streaming preview
+//! textures, writing local edits to the operation journal, and autosaving.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
@@ -15,33 +15,40 @@ use crate::canvas::manipulate::ZCounter;
 use crate::canvas::node::{
     CanvasNode, ImageData, ImageNode, NodeKind, Pose, TabOwner, to_bevy_image,
 };
-use super::db::{NodeBatch, ProjectDb, SavedNode};
+use uuid::Uuid;
+
 use super::import::{read_preview_cache, write_preview_cache};
+use super::local;
+use super::oplog::{self, Clock, Journal, MergeState, NodeId, Op, SavedNode};
 use super::store::ProjectStore;
 use super::tabs::Tabs;
 
-/// Per-project save bookkeeping (last-known db state of every node).
+/// Per-project save bookkeeping (last-known state of every node).
 #[derive(Default)]
 pub struct PersistenceState {
-    saved: HashMap<i64, SavedNode>,
-    view_saved: Option<(f64, f64, f64)>,
-    seconds_since_save: f32,
+    pub saved: HashMap<NodeId, SavedNode>,
+    pub seconds_since_save: f32,
 }
 
 #[derive(Resource, Default)]
 pub struct PreviewLoader {
     queues: HashMap<u64, VecDeque<PreviewJob>>,
     in_flight: Vec<(PreviewJob, Task<Regen>)>,
+    /// Failed decodes whose source file has not arrived yet. Delayed so a
+    /// missing file does not spin every frame.
+    retry: Vec<(Instant, PreviewJob)>,
     active: Option<u64>,
 }
 
 impl PreviewLoader {
     /// True while previews are still queued or regenerating. The idle throttle
-    /// keeps the loop at full speed until this drains: preview work is polled
-    /// once per frame, so a sleeping loop would starve it.
+    /// keeps the loop at full speed until this drains.
     pub fn is_active(&self) -> bool {
         !self.in_flight.is_empty()
-            || self.active.and_then(|id| self.queues.get(&id)).is_some_and(|q| !q.is_empty())
+            || self
+                .active
+                .and_then(|id| self.queues.get(&id))
+                .is_some_and(|q| !q.is_empty())
     }
 
     pub fn activate(&mut self, tab_id: u64) {
@@ -60,55 +67,80 @@ impl PreviewLoader {
 
     pub fn forget(&mut self, tab_id: u64) {
         self.queues.remove(&tab_id);
+        self.retry.retain(|(_, job)| job.tab_id != tab_id);
         if self.active == Some(tab_id) {
             self.in_flight.clear();
             self.active = None;
         }
+    }
+
+    pub fn enqueue(
+        &mut self,
+        tab_id: u64,
+        entity: Entity,
+        image_path: PathBuf,
+        cache_dir: PathBuf,
+        hash: String,
+    ) {
+        self.queues
+            .entry(tab_id)
+            .or_default()
+            .push_back(PreviewJob {
+                entity,
+                tab_id,
+                image_path,
+                cache_dir,
+                hash,
+                attempts: 0,
+            });
     }
 }
 
 #[derive(Clone)]
 struct PreviewJob {
     entity: Entity,
+    tab_id: u64,
     image_path: PathBuf,
     cache_dir: PathBuf,
     hash: String,
+    attempts: u32,
 }
 
 struct Regen {
     entity: Entity,
+    tab_id: u64,
+    image_path: PathBuf,
+    cache_dir: PathBuf,
+    hash: String,
+    attempts: u32,
     image: Option<Image>,
     size: UVec2,
 }
 
 const AUTOSAVE_INTERVAL: f32 = 1.5;
-/// Cap on preview decodes in flight at once. Decoding runs on the async
-/// compute pool, so this only bounds peak memory (each holds a decoded RGBA
-/// image) while keeping every pool thread busy.
+/// Cap on preview decodes in flight at once.
 const MAX_PREVIEW_IN_FLIGHT: usize = 32;
 /// Preview longest edge, pixels. The regenerator here and the pre-load size
 /// guess in `node.rs` must both match `import::PREVIEW_MAX`.
 pub const PREVIEW_MAX: u32 = 512;
-const VIEW_EPS_POS: f64 = 0.5;
-const VIEW_EPS_SCALE: f64 = 1e-4;
+/// Retry delay for a preview whose source file has not arrived yet.
+const PREVIEW_RETRY_MIN: u64 = 2;
+const PREVIEW_RETRY_MAX: u64 = 30;
 
 /// Solid dark-gray texture bound to restored nodes whose preview hasn't loaded
 /// yet: the node reads as a dim card instead of an invisible sprite.
-fn pending_placeholder() -> Image {
+pub(crate) fn pending_placeholder() -> Image {
     to_bevy_image(image::DynamicImage::ImageRgba8(
-        image::RgbaImage::from_pixel(
-            1,
-            1,
-            image::Rgba([0x33, 0x33, 0x33, 0xFF]), // #333333, a step above the canvas
-        ),
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0x33, 0x33, 0x33, 0xFF])),
     ))
 }
 
-/// Load a project's nodes into the world (hidden when `visible` is false).
-/// Returns the number of nodes and the stored camera, if any.
+/// Load a project's merged nodes into the world (hidden when `visible` is
+/// false). Returns the number of nodes spawned.
+#[allow(clippy::too_many_arguments)]
 pub fn load_into_world(
     store: &ProjectStore,
-    db: &ProjectDb,
+    merge: &MergeState,
     tab_id: u64,
     visible: bool,
     commands: &mut Commands,
@@ -116,149 +148,38 @@ pub fn load_into_world(
     zc: &mut ZCounter,
     loader: &mut PreviewLoader,
     state: &mut PersistenceState,
-) -> anyhow::Result<(usize, Option<(f64, f64, f64)>)> {
-    let loaded = db.load()?;
+) -> anyhow::Result<usize> {
     let placeholder = images.add(pending_placeholder());
     let mut count = 0usize;
     let mut missing = 0usize;
-    let mut max_z = 0.0f32;
 
-    for row in &loaded.nodes {
-        let s = &row.saved;
-        if s.kind == "frame" {
-            let pose = Pose {
-                center: Vec2::new(s.x, s.y),
-                size: Vec2::new(s.w, s.h),
-                rot: s.rot,
-            };
-            frames::spawn_frame(
-                commands,
-                tab_id,
-                visible,
-                Some(row.id),
-                s.label.clone().unwrap_or_else(|| "Frame".to_string()),
-                pose,
-                s.z,
-            );
-            state.saved.insert(row.id, s.clone());
-            max_z = max_z.max(s.z);
-            count += 1;
-            continue;
-        }
-        if s.kind != "image" {
-            continue;
-        }
-        let Some(rel_path) = s.src.clone() else {
-            continue;
-        };
-        let natural = UVec2::new(
-            s.img_w.unwrap_or(1).max(1) as u32,
-            s.img_h.unwrap_or(1).max(1) as u32,
+    for (id, saved) in merge.visible_nodes() {
+        let saved = normalize_saved(saved.clone());
+        spawn_saved_node(
+            commands,
+            tab_id,
+            id,
+            &saved,
+            visible,
+            store,
+            &placeholder,
+            loader,
+            zc,
         );
-        let hash = s.hash.clone().unwrap_or_default();
-        let abs_path = store.root.join(&rel_path);
-        // A missing original is the usual reason a node stays an empty
-        // placeholder: report it up front instead of silently waiting.
-        if !abs_path.exists() {
-            missing += 1;
-            if missing <= 5 {
-                warn!("image file missing: {}", abs_path.display());
+        if saved.kind == "image" {
+            let abs_path = saved
+                .src
+                .as_ref()
+                .map(|src| store.root.join(src))
+                .unwrap_or_default();
+            if !abs_path.exists() {
+                missing += 1;
+                if missing <= 5 {
+                    warn!("image file missing: {}", abs_path.display());
+                }
             }
         }
-        // Crop/scale: legacy rows (columns NULL) default to the full image
-        // scaled to the stored display size.
-        let has_crop = matches!((s.crop_w, s.crop_h), (Some(w), Some(h)) if w > 0.0 && h > 0.0);
-        let crop = if has_crop {
-            Rect::from_corners(
-                Vec2::new(s.crop_x.unwrap_or(0.0), s.crop_y.unwrap_or(0.0)),
-                Vec2::new(
-                    s.crop_x.unwrap_or(0.0) + s.crop_w.unwrap_or(0.0),
-                    s.crop_y.unwrap_or(0.0) + s.crop_h.unwrap_or(0.0),
-                ),
-            )
-        } else {
-            ImageData::full_crop(natural)
-        };
-        let px_scale = s.px_scale.filter(|p| *p > 0.0).unwrap_or_else(|| {
-            let nat = natural.as_vec2().max(Vec2::ONE);
-            (s.w / nat.x).max(s.h / nat.y).max(1e-4)
-        });
-        let size = crop.size() * px_scale;
-        let pose = Pose {
-            center: Vec2::new(s.x, s.y),
-            size,
-            rot: s.rot,
-        };
-        // Best-guess preview size until the real cached preview loads (which
-        // updates this via `pump_preview_loads`). Aspect-preserving, like the
-        // preview generator.
-        let preview_size = ImageData::preview_size_for(natural);
-        let data = ImageData {
-            rel_path: rel_path.clone(),
-            abs_path: abs_path.clone(),
-            orig_name: s.orig_name.clone().unwrap_or_default(),
-            hash: hash.clone(),
-            natural,
-            preview: placeholder.clone(),
-            preview_size,
-            preview_pending: true,
-            crop,
-            px_scale,
-        };
-
-        let entity = commands
-            .spawn((
-                CanvasNode {
-                    db_id: Some(row.id),
-                    kind: NodeKind::Image(ImageNode {
-                        data,
-                        full: None,
-                        full_incoming: None,
-                        sampler_nearest: false,
-                        pending_cpu_free: None,
-                        resident_bytes: 0,
-                        last_needed: 0.0,
-                        sprite_material: None,
-                    }),
-                    size: pose.size,
-                    rotation: pose.rot,
-                },
-                Sprite {
-                    image: placeholder.clone(),
-                    custom_size: Some(pose.size),
-                    // Preview tier (see `ImageData::tier_rect_of`).
-                    rect: Some(ImageData::tier_rect_of(
-                        crop,
-                        natural,
-                        preview_size,
-                        false,
-                    )),
-                    flip_x: s.flip_x,
-                    flip_y: s.flip_y,
-                    ..default()
-                },
-                Transform {
-                    translation: Vec3::new(pose.center.x, pose.center.y, s.z),
-                    rotation: Quat::from_rotation_z(pose.rot),
-                    ..default()
-                },
-                TabOwner(tab_id),
-                if visible {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                },
-            ))
-            .id();
-
-        loader.queues.entry(tab_id).or_default().push_back(PreviewJob {
-            entity,
-            image_path: abs_path,
-            cache_dir: store.cache_dir(),
-            hash,
-        });
-        state.saved.insert(row.id, s.clone());
-        max_z = max_z.max(s.z);
+        state.saved.insert(id, saved);
         count += 1;
     }
 
@@ -269,37 +190,162 @@ pub fn load_into_world(
         );
     }
 
-    if let Some(view) = loaded.view {
-        state.view_saved = Some(view);
-    }
-    zc.0 = zc.0.max(max_z);
-    Ok((count, loaded.view))
+    Ok(count)
 }
 
-/// Save all nodes belonging to `tab_id` (insert / update / delete) plus the
-/// camera state, if anything changed, as one batched transaction (single
-/// fsync), so a large selection never freezes the frame while dragging.
-pub fn save_nodes(
-    db: &ProjectDb,
+/// Spawn one node from stored state and queue its preview if needed.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_saved_node(
+    commands: &mut Commands,
     tab_id: u64,
+    id: NodeId,
+    saved: &SavedNode,
+    visible: bool,
+    store: &ProjectStore,
+    placeholder: &Handle<Image>,
+    loader: &mut PreviewLoader,
+    zc: &mut ZCounter,
+) -> Option<Entity> {
+    zc.0 = zc.0.max(saved.z);
+    if saved.kind == "frame" {
+        return Some(frames::spawn_frame(
+            commands,
+            tab_id,
+            visible,
+            Some(id),
+            saved.label.clone().unwrap_or_else(|| "Frame".to_string()),
+            Pose {
+                center: Vec2::new(saved.x, saved.y),
+                size: Vec2::new(saved.w, saved.h),
+                rot: saved.rot,
+            },
+            saved.z,
+        ));
+    }
+    if saved.kind != "image" {
+        return None;
+    }
+    let rel_path = saved.src.clone()?;
+    let natural = UVec2::new(
+        saved.img_w.unwrap_or(1).max(1) as u32,
+        saved.img_h.unwrap_or(1).max(1) as u32,
+    );
+    let hash = saved.hash.clone().unwrap_or_default();
+    let abs_path = store.root.join(&rel_path);
+    let has_crop = matches!(
+        (saved.crop_w, saved.crop_h),
+        (Some(w), Some(h)) if w > 0.0 && h > 0.0
+    );
+    let crop = if has_crop {
+        Rect::from_corners(
+            Vec2::new(saved.crop_x.unwrap_or(0.0), saved.crop_y.unwrap_or(0.0)),
+            Vec2::new(
+                saved.crop_x.unwrap_or(0.0) + saved.crop_w.unwrap_or(0.0),
+                saved.crop_y.unwrap_or(0.0) + saved.crop_h.unwrap_or(0.0),
+            ),
+        )
+    } else {
+        ImageData::full_crop(natural)
+    };
+    let px_scale = saved.px_scale.filter(|p| *p > 0.0).unwrap_or_else(|| {
+        let nat = natural.as_vec2().max(Vec2::ONE);
+        (saved.w / nat.x).max(saved.h / nat.y).max(1e-4)
+    });
+    let size = crop.size() * px_scale;
+    let pose = Pose {
+        center: Vec2::new(saved.x, saved.y),
+        size,
+        rot: saved.rot,
+    };
+    let preview_size = ImageData::preview_size_for(natural);
+    let data = ImageData {
+        rel_path,
+        abs_path: abs_path.clone(),
+        orig_name: saved.orig_name.clone().unwrap_or_default(),
+        hash: hash.clone(),
+        natural,
+        preview: placeholder.clone(),
+        preview_size,
+        preview_pending: true,
+        crop,
+        px_scale,
+    };
+
+    let entity = commands
+        .spawn((
+            CanvasNode {
+                node_id: Some(id),
+                kind: NodeKind::Image(ImageNode {
+                    data,
+                    full: None,
+                    full_incoming: None,
+                    sampler_nearest: false,
+                    pending_cpu_free: None,
+                    resident_bytes: 0,
+                    last_needed: 0.0,
+                    sprite_material: None,
+                }),
+                size: pose.size,
+                rotation: pose.rot,
+            },
+            Sprite {
+                image: placeholder.clone(),
+                custom_size: Some(pose.size),
+                rect: Some(ImageData::tier_rect_of(crop, natural, preview_size, false)),
+                flip_x: saved.flip_x,
+                flip_y: saved.flip_y,
+                ..default()
+            },
+            Transform {
+                translation: Vec3::new(pose.center.x, pose.center.y, saved.z),
+                rotation: Quat::from_rotation_z(pose.rot),
+                ..default()
+            },
+            TabOwner(tab_id),
+            if visible {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            },
+        ))
+        .id();
+
+    if !visible {
+        commands
+            .entity(entity)
+            .insert(crate::canvas::node::InactiveTab);
+    }
+    loader.enqueue(tab_id, entity, abs_path, store.cache_dir(), hash);
+    Some(entity)
+}
+
+/// Save all nodes belonging to `tab_id` (insert / update / delete) as one
+/// journal batch, then update the merge state and local bookkeeping.
+pub fn save_nodes(
+    tab_id: u64,
+    journal: &mut Journal,
+    merge: &mut MergeState,
     state: &mut PersistenceState,
-    view: &View,
+    clock: &mut Clock,
     q: &mut Query<(Entity, &Transform, &mut CanvasNode, &Sprite, &TabOwner)>,
-) {
+) -> bool {
     let t0 = Instant::now();
 
-    // Diff first, write once.
-    let mut inserts: Vec<(Entity, SavedNode)> = Vec::new();
-    let mut updates: Vec<(i64, SavedNode)> = Vec::new();
-    let mut current: HashSet<i64> = HashSet::new();
+    let mut inserts: Vec<(Entity, NodeId, SavedNode)> = Vec::new();
+    let mut updates: Vec<(NodeId, SavedNode)> = Vec::new();
+    let mut current: HashSet<NodeId> = HashSet::new();
 
     for (e, tf, node, sprite, owner) in q.iter_mut() {
         if owner.0 != tab_id {
             continue;
         }
         let saved = saved_from(tf, &node, sprite);
-        match node.db_id {
-            None => inserts.push((e, saved)),
+        match node.node_id {
+            None => {
+                let id = Uuid::now_v7();
+                current.insert(id);
+                inserts.push((e, id, saved));
+            }
             Some(id) => {
                 current.insert(id);
                 if state.saved.get(&id) != Some(&saved) {
@@ -309,45 +355,55 @@ pub fn save_nodes(
         }
     }
 
-    let gone: Vec<i64> = state
+    let gone: Vec<NodeId> = state
         .saved
         .keys()
         .filter(|id| !current.contains(id))
         .copied()
         .collect();
 
-    let v = (view.center.x, view.center.y, view.log_scale);
-    let view_changed = match state.view_saved {
-        Some(prev) => {
-            (prev.0 - v.0).abs() > VIEW_EPS_POS
-                || (prev.1 - v.1).abs() > VIEW_EPS_POS
-                || (prev.2 - v.2).abs() > VIEW_EPS_SCALE
-        }
-        None => true,
-    };
-
-    if inserts.is_empty() && updates.is_empty() && gone.is_empty() && !view_changed {
-        return;
+    if inserts.is_empty() && updates.is_empty() && gone.is_empty() {
+        return false;
     }
 
-    let batch = NodeBatch {
-        inserts: inserts.iter().map(|(_, n)| n).collect(),
-        updates: updates.iter().map(|(id, n)| (*id, n)).collect(),
-        deletes: gone.clone(),
-        view: view_changed.then_some(v),
-    };
-    let new_ids = match db.apply_batch(&batch) {
-        Ok(ids) => ids,
-        Err(err) => {
-            warn!("db save failed: {err:#}");
-            return;
-        }
-    };
+    let mut ops: Vec<Op> = Vec::with_capacity(inserts.len() + updates.len() + gone.len());
+    for (_, id, node) in &inserts {
+        ops.push(Op {
+            id: *id,
+            rev: clock.tick(),
+            deleted: false,
+            node: Some(node.clone()),
+        });
+    }
+    for (id, node) in &updates {
+        ops.push(Op {
+            id: *id,
+            rev: clock.tick(),
+            deleted: false,
+            node: Some(node.clone()),
+        });
+    }
+    for id in &gone {
+        ops.push(Op {
+            id: *id,
+            rev: clock.tick(),
+            deleted: true,
+            node: None,
+        });
+    }
 
-    // Bookkeeping only after the write succeeded.
-    for ((e, saved), id) in inserts.into_iter().zip(new_ids) {
+    if let Err(err) = journal.append(ops.clone()) {
+        warn!("journal append failed: {err:#}");
+        return false;
+    }
+    local::save_clock(clock);
+    for op in &ops {
+        merge.merge(op.id, op.rev.clone(), op.deleted, op.node.clone());
+    }
+
+    for (e, id, saved) in inserts {
         if let Ok((_, _, mut node, _, _)) = q.get_mut(e) {
-            node.db_id = Some(id);
+            node.node_id = Some(id);
         }
         state.saved.insert(id, saved);
     }
@@ -357,18 +413,54 @@ pub fn save_nodes(
     for id in gone {
         state.saved.remove(&id);
     }
-    if view_changed {
-        state.view_saved = Some(v);
-    }
 
-    // Canary for save hitches (logged at debug level).
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
     if ms > 40.0 {
         debug!("save diag: {ms:.1} ms (slow save!)");
     }
+    true
 }
 
-fn saved_from(tf: &Transform, node: &CanvasNode, sprite: &Sprite) -> SavedNode {
+/// Fill in defaults that the scene derives on spawn, so the saved baseline
+/// matches what the ECS will report on the next diff. Missing crop/scale fields
+/// come from older rows and must not look like a local edit.
+pub(crate) fn normalize_saved(mut saved: SavedNode) -> SavedNode {
+    if saved.kind == "frame" {
+        if saved.label.is_none() {
+            saved.label = Some("Frame".to_string());
+        }
+        return saved;
+    }
+    if saved.kind != "image" {
+        return saved;
+    }
+    let natural = Vec2::new(
+        saved.img_w.unwrap_or(1).max(1) as f32,
+        saved.img_h.unwrap_or(1).max(1) as f32,
+    );
+    if !matches!(
+        (saved.crop_w, saved.crop_h),
+        (Some(w), Some(h)) if w > 0.0 && h > 0.0
+    ) {
+        saved.crop_x = Some(0.0);
+        saved.crop_y = Some(0.0);
+        saved.crop_w = Some(natural.x);
+        saved.crop_h = Some(natural.y);
+    }
+    if !saved.px_scale.is_some_and(|scale| scale > 0.0) {
+        let natural = natural.max(Vec2::ONE);
+        saved.px_scale = Some((saved.w / natural.x).max(saved.h / natural.y).max(1e-4));
+    }
+    if saved.orig_name.is_none() {
+        saved.orig_name = Some(String::new());
+    }
+    if saved.hash.is_none() {
+        saved.hash = Some(String::new());
+    }
+    saved
+}
+
+pub(crate) fn saved_from(tf: &Transform, node: &CanvasNode, sprite: &Sprite) -> SavedNode {
     let (src, orig_name, hash, img_w, img_h, kind, label, crop, px_scale) = match &node.kind {
         NodeKind::Image(img) => (
             Some(img.data.rel_path.clone()),
@@ -417,7 +509,7 @@ fn saved_from(tf: &Transform, node: &CanvasNode, sprite: &Sprite) -> SavedNode {
     }
 }
 
-/// Periodic autosave of the active tab.
+/// Periodic autosave of the active tab plus a throttled local camera write.
 pub fn autosave(
     time: Res<Time>,
     mut tabs: ResMut<Tabs>,
@@ -428,6 +520,8 @@ pub fn autosave(
         return;
     }
     let active = tabs.active.min(tabs.stored.len() - 1);
+    let tabs = &mut *tabs;
+    let clock = &mut tabs.clock;
     let tab = &mut tabs.stored[active];
     if !tab.loaded {
         return;
@@ -438,12 +532,24 @@ pub fn autosave(
     }
     tab.state.seconds_since_save = 0.0;
     tab.view = (view.center, view.log_scale);
-    save_nodes(&tab.db, tab.id, &mut tab.state, &view, &mut q);
+
+    if save_nodes(
+        tab.id,
+        &mut tab.journal,
+        &mut tab.merge,
+        &mut tab.state,
+        clock,
+        &mut q,
+    ) {
+        tab.state_dirty = true;
+        tab.checkpoint_dirty = true;
+    }
+    local::save_view(&tab.store.root, view.center, view.log_scale);
 }
 
-/// Stream preview textures in. Decoding runs on the async compute pool (cache
-/// hits and misses alike) so a big project loads across every core; the main
-/// thread only uploads finished images and binds them.
+/// Stream preview textures in. Decoding runs on the async compute pool so a big
+/// project loads across every core; the main thread only uploads finished
+/// images and binds them.
 pub fn pump_preview_loads(
     mut loader: ResMut<PreviewLoader>,
     mut images: ResMut<Assets<Image>>,
@@ -451,6 +557,20 @@ pub fn pump_preview_loads(
     frame: Res<FrameCounter>,
     mut q: Query<(&mut CanvasNode, &mut Sprite), Without<crate::canvas::node::InactiveTab>>,
 ) {
+    // Move due retries back into the queue.
+    let now = Instant::now();
+    let mut i = 0;
+    while i < loader.retry.len() {
+        if loader.retry[i].0 <= now {
+            let (_, job) = loader.retry.swap_remove(i);
+            if let Some(queue) = loader.queues.get_mut(&job.tab_id) {
+                queue.push_front(job);
+            }
+        } else {
+            i += 1;
+        }
+    }
+
     // Completed decodes.
     let mut i = 0;
     while i < loader.in_flight.len() {
@@ -460,21 +580,13 @@ pub fn pump_preview_loads(
                 Some(image) => {
                     if let Ok((mut node, mut sprite)) = q.get_mut(regen.entity) {
                         let handle = images.add(image);
-                        // The upload is deferred by the per-frame byte budget;
-                        // tracking it here keeps the idle throttle from napping
-                        // while textures are still queued (see `has_pending`).
                         tex_state.touch(handle.id(), frame.0);
                         if let Some(img) = node.image_mut() {
                             img.data.preview = handle.clone();
                             img.data.preview_size = regen.size;
                             img.data.preview_pending = false;
                         }
-                        // Keep the full-res texture bound if it already finished
-                        // loading: switching the sprite to the preview while
-                        // `img.full` is Some would desync the rect (it's derived
-                        // from the tier the node believes it is on).
-                        let showing_full =
-                            node.image().map(|i| i.full.is_some()).unwrap_or(false);
+                        let showing_full = node.image().map(|i| i.full.is_some()).unwrap_or(false);
                         if !showing_full {
                             sprite.image = handle;
                             if let Some(img) = node.image() {
@@ -484,13 +596,39 @@ pub fn pump_preview_loads(
                     }
                 }
                 None => {
-                    // Decode failed (missing or corrupt original). Stop
-                    // treating the node as pending so the dim outline (and the
-                    // idle throttle's busy signal) can't stay pinned forever.
-                    if let Ok((mut node, _)) = q.get_mut(regen.entity) {
-                        if let Some(img) = node.image_mut() {
+                    // A missing source file usually means the blob is still on
+                    // its way from another machine. Retry with a backoff. A
+                    // file that exists but cannot be decoded may also be a
+                    // partially replicated version, so give it a few attempts
+                    // before treating it as permanently bad.
+                    let exists = regen.image_path.exists();
+                    let give_up = exists && regen.attempts >= 4;
+                    if give_up {
+                        if let Ok((mut node, _)) = q.get_mut(regen.entity)
+                            && let Some(img) = node.image_mut()
+                        {
                             img.data.preview_pending = false;
                         }
+                        warn!(
+                            "preview for {} not generated (file unreadable)",
+                            regen.image_path.display()
+                        );
+                    } else {
+                        let attempts = regen.attempts.saturating_add(1);
+                        let delay = PREVIEW_RETRY_MIN
+                            .saturating_mul(1u64 << attempts.min(4))
+                            .min(PREVIEW_RETRY_MAX);
+                        loader.retry.push((
+                            Instant::now() + Duration::from_secs(delay),
+                            PreviewJob {
+                                entity: regen.entity,
+                                tab_id: regen.tab_id,
+                                image_path: regen.image_path,
+                                cache_dir: regen.cache_dir,
+                                hash: regen.hash,
+                                attempts,
+                            },
+                        ));
                     }
                 }
             }
@@ -499,10 +637,6 @@ pub fn pump_preview_loads(
         }
     }
 
-    // Start decodes up to the in-flight cap. Cache hits and misses both run on
-    // the async compute pool: the main thread only uploads finished images, so
-    // a large project loads across all pool threads instead of a one-per-frame
-    // trickle that leaves the CPU idle.
     let Some(active) = loader.active else {
         return;
     };
@@ -515,21 +649,29 @@ pub fn pump_preview_loads(
         }
         let PreviewJob {
             entity,
+            tab_id,
             image_path,
             cache_dir,
             hash,
+            attempts,
         } = job.clone();
         let task = AsyncComputeTaskPool::get().spawn(async move {
-            // Cache hit: decode the small preview.
+            let image_path_for_result = image_path.clone();
+            let cache_dir_for_result = cache_dir.clone();
+            let hash_for_result = hash.clone();
             if let Some(cached) = read_preview_cache(&cache_dir, &hash) {
                 let size = UVec2::new(cached.width().max(1), cached.height().max(1));
                 return Regen {
                     entity,
+                    tab_id,
+                    image_path: image_path_for_result,
+                    cache_dir: cache_dir_for_result,
+                    hash: hash_for_result,
+                    attempts,
                     image: Some(to_bevy_image(cached)),
                     size,
                 };
             }
-            // Cache miss: regenerate from the original and cache it.
             let loaded = std::fs::read(&image_path)
                 .map_err(|err| format!("read failed: {err}"))
                 .and_then(|bytes| {
@@ -546,6 +688,11 @@ pub fn pump_preview_loads(
                     write_preview_cache(&cache_dir, &hash, &preview);
                     Regen {
                         entity,
+                        tab_id,
+                        image_path: image_path_for_result,
+                        cache_dir: cache_dir_for_result,
+                        hash: hash_for_result,
+                        attempts,
                         image: Some(to_bevy_image(preview)),
                         size,
                     }
@@ -557,6 +704,11 @@ pub fn pump_preview_loads(
                     );
                     Regen {
                         entity,
+                        tab_id,
+                        image_path: image_path_for_result,
+                        cache_dir: cache_dir_for_result,
+                        hash: hash_for_result,
+                        attempts,
                         image: None,
                         size: UVec2::ONE,
                     }
@@ -567,6 +719,15 @@ pub fn pump_preview_loads(
     }
 }
 
+/// Persist local merged state and a checkpoint for this device on exit.
+pub fn save_on_exit(tab: &super::tabs::OpenTab, device: &str) {
+    local::save_state(&tab.store.root, &tab.merge, &tab.files);
+    local::save_view(&tab.store.root, tab.view.0, tab.view.1);
+    if let Err(err) = oplog::write_checkpoint(&tab.store.checkpoint_dir(), device, &tab.merge) {
+        warn!("checkpoint write failed: {err:#}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,9 +735,11 @@ mod tests {
     fn job(index: u32) -> PreviewJob {
         PreviewJob {
             entity: Entity::from_raw_u32(index).unwrap(),
+            tab_id: index as u64,
             image_path: PathBuf::new(),
             cache_dir: PathBuf::new(),
             hash: index.to_string(),
+            attempts: 0,
         }
     }
 
@@ -600,7 +763,9 @@ mod tests {
         let pool = bevy::tasks::TaskPoolBuilder::new().num_threads(1).build();
         let mut loader = PreviewLoader::default();
         loader.activate(0);
-        loader.in_flight.push((job(1), pool.spawn(std::future::pending::<Regen>())));
+        loader
+            .in_flight
+            .push((job(1), pool.spawn(std::future::pending::<Regen>())));
         loader.activate(1);
         assert!(loader.in_flight.is_empty());
         assert_eq!(loader.queues[&0].len(), 1);

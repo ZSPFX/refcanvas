@@ -100,7 +100,7 @@ fn respawn(
             commands
                 .spawn((
                     CanvasNode {
-                        db_id: None, // fresh row in the project db
+                        node_id: None, // fresh id when a deleted node is re-added
                         kind: NodeKind::Image(ImageNode {
                             data: data.clone(),
                             full: None,
@@ -247,7 +247,9 @@ fn apply(
         UndoEntry::Added { mut items } => {
             if undoing {
                 for record in &items {
-                    commands.entity(record.entity).despawn();
+                    if q.get(record.entity).is_ok() {
+                        commands.entity(record.entity).despawn();
+                    }
                 }
             } else {
                 for record in &mut items {
@@ -263,7 +265,9 @@ fn apply(
                 }
             } else {
                 for record in &items {
-                    commands.entity(record.entity).despawn();
+                    if q.get(record.entity).is_ok() {
+                        commands.entity(record.entity).despawn();
+                    }
                 }
             }
             UndoEntry::Removed { items }

@@ -405,7 +405,14 @@ fn import_one(store: &ProjectStore, source: ImportSource) -> anyhow::Result<Impo
     let rel_path = format!("images/{short}.{ext}");
 
     let dest = store.root.join(&rel_path);
-    if !dest.exists() {
+    // Content-addressed, so an existing file with the right length is already
+    // the correct blob. A short file means a previous write was interrupted
+    // (or a partially replicated version); repair it instead of trusting it.
+    let needs_write = match std::fs::metadata(&dest) {
+        Ok(meta) => meta.len() != bytes.len() as u64,
+        Err(_) => true,
+    };
+    if needs_write {
         std::fs::write(&dest, &bytes)?;
     }
 

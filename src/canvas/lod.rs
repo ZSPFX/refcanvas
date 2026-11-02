@@ -33,6 +33,14 @@ pub struct FrameCounter(pub u64);
 #[derive(Resource, Default)]
 pub struct FullLoadWarns(HashSet<PathBuf>);
 
+/// Cooldown for a full-res decode whose file is not available yet. Remote
+/// blobs can arrive after the node that references them; without this the
+/// loader would retry a missing file every frame.
+#[derive(Component)]
+pub struct FullLoadBackoff {
+    until: f64,
+}
+
 /// Backstop for resident full-res VRAM. Normally memory is reclaimed
 /// proactively (a texture is dropped once it stops being needed, panned away,
 /// zoomed out, or on an inactive tab); this only caps the actively-viewed
@@ -283,6 +291,7 @@ pub fn ensure_full_textures(
         &Transform,
         &mut CanvasNode,
         Option<&FullLoadTask>,
+        Option<&FullLoadBackoff>,
         &TabOwner,
     ), Without<InactiveTab>>,
 ) {
@@ -296,7 +305,10 @@ pub fn ensure_full_textures(
     // Cap concurrent full-res loads (see MAX_FULL_LOADS_IN_FLIGHT). Enforced
     // per-node inside the loop instead of returning here: the visibility/LRU
     // bookkeeping below must keep running even while the cap is saturated.
-    let mut in_flight = q.iter().filter(|(_, _, _, task, _)| task.is_some()).count();
+    let mut in_flight = q
+        .iter()
+        .filter(|(_, _, _, task, _, _)| task.is_some())
+        .count();
     let now = time.elapsed_secs_f64();
     let Some(active_id) = tabs.active_id() else {
         return;
@@ -312,7 +324,7 @@ pub fn ensure_full_textures(
     let view_rect =
         Rect::from_center_size(view.center.as_vec2(), window.size() * wpp * LOAD_MARGIN);
 
-    for (entity, tf, mut node, task, owner) in &mut q {
+    for (entity, tf, mut node, task, backoff, owner) in &mut q {
         if owner.0 != active_id {
             continue;
         }
@@ -349,6 +361,9 @@ pub fn ensure_full_textures(
         if task.is_some() || !load_needed {
             continue;
         }
+        if backoff.is_some_and(|backoff| backoff.until > now) {
+            continue;
+        }
         if in_flight >= MAX_FULL_LOADS_IN_FLIGHT {
             continue;
         }
@@ -370,6 +385,7 @@ pub fn ensure_full_textures(
 
 pub fn collect_full_textures(
     frame: Res<FrameCounter>,
+    time: Res<Time>,
     resize: Res<crate::WindowResize>,
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -387,6 +403,7 @@ pub fn collect_full_textures(
             commands.entity(entity).remove::<FullLoadTask>();
             match result {
                 Ok(image) => {
+                    commands.entity(entity).remove::<FullLoadBackoff>();
                     if let Some(img) = node.image() {
                         warns.0.remove(&img.data.abs_path);
                     }
@@ -402,7 +419,12 @@ pub fn collect_full_textures(
                     }
                 }
                 Err(err) => {
-                    // Retried every frame while visible: report each file once.
+                    // Retry after a short cooldown: a file that is still being
+                    // replicated should not be read again on every frame.
+                    commands.entity(entity).insert(FullLoadBackoff {
+                        until: time.elapsed_secs_f64() + 2.0,
+                    });
+                    // Retried every cooldown while visible: report each file once.
                     if let Some(img) = node.image() {
                         let path = img.data.abs_path.clone();
                         if warns.0.insert(path.clone()) {

@@ -116,7 +116,7 @@ pub fn spawn_image_node_with_z(
     commands
         .spawn((
             CanvasNode {
-                db_id: None,
+                node_id: None,
                 kind: NodeKind::Image(super::node::ImageNode {
                     data,
                     full: None,

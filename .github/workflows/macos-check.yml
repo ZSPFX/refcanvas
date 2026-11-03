@@ -2,10 +2,23 @@ name: macOS check
 
 # Compiles the macOS target on changes without producing any artifacts, so a
 # Darwin-only regression is caught long before the next release.
+#
+# Only inputs that affect the compiled app are listed: docs, release scripts,
+# packaging and runtime assets are deliberately left out so they never spend
+# macOS runner minutes.
 on:
   pull_request:
+    paths: &app-inputs
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "vendor/**"
+      - ".github/workflows/macos-check.yml"
   push:
     branches: [main, master]
+    paths: *app-inputs
+  workflow_dispatch:
 
 permissions:
   contents: read

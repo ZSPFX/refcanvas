@@ -25,6 +25,7 @@ use bevy_egui::{EguiContexts, egui};
 #[derive(Resource, Default)]
 pub struct ChordMemory {
     ctrl_last: u64,
+    cmd_last: u64,
     shift_last: u64,
     alt_last: u64,
 }
@@ -43,6 +44,12 @@ pub fn track_chords(
     {
         mem.ctrl_last = f;
     }
+    if keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight])
+        || keys.any_just_pressed([KeyCode::SuperLeft, KeyCode::SuperRight])
+        || keys.any_just_released([KeyCode::SuperLeft, KeyCode::SuperRight])
+    {
+        mem.cmd_last = f;
+    }
     if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
         || keys.any_just_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
         || keys.any_just_released([KeyCode::ShiftLeft, KeyCode::ShiftRight])
@@ -60,6 +67,20 @@ pub fn track_chords(
 pub fn ctrl_down(keys: &ButtonInput<KeyCode>, mem: &ChordMemory, frame: u64) -> bool {
     keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
         || frame.saturating_sub(mem.ctrl_last) <= CHORD_GRACE_FRAMES
+}
+
+/// The platform's command modifier for shortcuts: Command on macOS, Control
+/// everywhere else. Drag modifiers (snapping/crop) keep using [`ctrl_down`]
+/// so they stay physical.
+#[cfg(target_os = "macos")]
+pub fn command_down(keys: &ButtonInput<KeyCode>, mem: &ChordMemory, frame: u64) -> bool {
+    keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight])
+        || frame.saturating_sub(mem.cmd_last) <= CHORD_GRACE_FRAMES
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn command_down(keys: &ButtonInput<KeyCode>, mem: &ChordMemory, frame: u64) -> bool {
+    ctrl_down(keys, mem, frame)
 }
 
 pub fn shift_down(keys: &ButtonInput<KeyCode>, mem: &ChordMemory, frame: u64) -> bool {

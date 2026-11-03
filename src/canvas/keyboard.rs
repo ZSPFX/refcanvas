@@ -46,7 +46,7 @@ pub fn shortcuts(
         return;
     }
 
-    let ctrl = crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0);
+    let ctrl = crate::canvas::command_down(&keys, &chord_mem, chord_frame.0);
 
     // ---- Focus: F frames the selection (or everything), A frames all ----
     let focus_selection = keys.just_pressed(KeyCode::KeyF);
@@ -239,7 +239,10 @@ pub fn shortcuts(
     }
 
     // ---- Grid visibility ----
-    if !ctrl && keys.just_pressed(KeyCode::KeyG) {
+    if !ctrl
+        && !crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0)
+        && keys.just_pressed(KeyCode::KeyG)
+    {
         ctx.grid_fade.0 = if ctx.grid_fade.0 > 0.5 { 0.0 } else { 1.0 };
     }
 }

@@ -317,7 +317,7 @@ pub fn tab_shortcuts(
             TabRequest::Open(dir)
         });
     }
-    if !crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0) {
+    if !crate::canvas::command_down(&keys, &chord_mem, chord_frame.0) {
         return;
     }
     let shift = crate::canvas::shift_down(&keys, &chord_mem, chord_frame.0);

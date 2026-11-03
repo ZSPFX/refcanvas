@@ -243,7 +243,7 @@ pub fn dialog_import(
         enqueue_paths(&mut queue, view.center.as_vec2(), paths);
     }
 
-    let ctrl = crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0);
+    let ctrl = crate::canvas::command_down(&keys, &chord_mem, chord_frame.0);
     if !(ctrl && keys.just_pressed(KeyCode::KeyI)) {
         return;
     }

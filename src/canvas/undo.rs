@@ -1,8 +1,13 @@
 //! Undo / redo (Ctrl+Z / Ctrl+Shift+Z, Ctrl+Y).
 //!
+//! The shortcut is matched on the *logical* key, not the physical position, so
+//! a QWERTZ keyboard (Z and Y swapped) behaves like it reads on the keycaps.
+//!
 //! Entries are snapshots, not diffs: transforms restore exactly, and
 //! add/remove entries carry the node data needed to respawn entities.
 
+use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
@@ -188,8 +193,12 @@ pub fn records_of(
 
 /// Undo/redo: `Z` alone (or Ctrl+Z) undoes; Shift+Z, Ctrl+Shift+Z or Ctrl+Y
 /// redo.
+///
+/// Keys are matched by the *logical* character, so QWERTZ (Z and Y swapped)
+/// undoes with the key labelled Z and redos with the key labelled Y.
 pub fn undo_redo(
     keys: Res<ButtonInput<KeyCode>>,
+    mut presses: MessageReader<KeyboardInput>,
     chord_mem: Res<crate::canvas::ChordMemory>,
     chord_frame: Res<super::lod::FrameCounter>,
     mut contexts: EguiContexts,
@@ -202,11 +211,47 @@ pub fn undo_redo(
     if super::egui_keyboard_busy(&mut contexts) {
         return;
     }
-    let ctrl = crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0);
+    let ctrl = crate::canvas::command_down(&keys, &chord_mem, chord_frame.0);
     let shift = crate::canvas::shift_down(&keys, &chord_mem, chord_frame.0);
-    let undo = keys.just_pressed(KeyCode::KeyZ) && !shift;
-    let redo =
-        (keys.just_pressed(KeyCode::KeyZ) && shift) || (ctrl && keys.just_pressed(KeyCode::KeyY));
+
+    // Decide from the *logical* letters, so a QWERTZ keyboard (Z and Y swapped)
+    // undo/redos exactly as the keycaps read. Matching by letter keeps the
+    // classic Ctrl+Y redo while making Ctrl+Z (typed on the physical Y key)
+    // undo as well.
+    let mut undo_pressed = false;
+    let mut redo_pressed = false;
+    let mut saw_character = false;
+    for input in presses.read() {
+        if input.state != ButtonState::Pressed || input.repeat {
+            continue;
+        }
+        let Key::Character(text) = &input.logical_key else {
+            continue;
+        };
+        saw_character = true;
+        let letter = text.chars().next().map(|c| c.to_ascii_lowercase());
+        match letter {
+            Some('z') if !shift => undo_pressed = true,
+            Some('z') => redo_pressed = true,
+            // `ctrl` keeps Ctrl+Y a redo and leaves a bare `y` free for tools.
+            Some('y') if ctrl => redo_pressed = true,
+            _ => {}
+        }
+    }
+
+    // Fall back to the physical keys when the platform reported no character
+    // (some IMEs and remote sessions), so the shortcut never goes dead. On a
+    // QWERTZ layout the Y key *is* the undo key, hence both codes here.
+    let undo = undo_pressed
+        || (!saw_character
+            && (keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::KeyY))
+            && !shift
+            && !redo_pressed
+            && !ctrl);
+    let redo = redo_pressed
+        || (!saw_character && keys.just_pressed(KeyCode::KeyZ) && shift)
+        || (!saw_character && ctrl && keys.just_pressed(KeyCode::KeyY));
+
     if !undo && !redo {
         return;
     }

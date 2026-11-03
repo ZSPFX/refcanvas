@@ -4,11 +4,13 @@
 //! - Alt+MMB drag (or plain MMB drag, or Space+LMB drag): pan
 //! - Alt+RMB drag: dolly (zoom), anchored at the cursor
 //! - Mouse wheel: zoom at cursor
+//! - Trackpad two-finger drag: pan (the system sends it as precise scrolling)
+//! - Ctrl/Cmd + scroll: zoom, for trackpads and wheels alike
 //!
 //! The view state is stored in f64 so panning far away from the origin stays
 //! precise; the Bevy camera transform is a f32 mirror of it.
 
-use bevy::input::mouse::AccumulatedMouseScroll;
+use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::math::DVec2;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, RequestRedraw};
@@ -22,6 +24,10 @@ const MIN_LOG_SCALE: f64 = -7.0;
 const MAX_LOG_SCALE: f64 = 11.0;
 /// Log-zoom change per wheel line.
 const ZOOM_WHEEL_SENSITIVITY: f64 = 0.16;
+/// Scroll pixels that count as one wheel line. Precision touchpads report
+/// pixels (a gesture is tens to hundreds of them), wheels report lines; both
+/// must reach the zoom curve at comparable magnitudes.
+const SCROLL_PIXELS_PER_LINE: f32 = 100.0;
 /// Log-zoom change per logical pixel of horizontal Alt+RMB dolly drag.
 const ZOOM_DRAG_SENSITIVITY: f64 = 0.006;
 /// Time constant of the exponential view smoothing (seconds).
@@ -48,6 +54,8 @@ pub struct View {
     dolly_prev_x: Option<f32>,
     /// Sign of the current Alt+RMB dolly drag (+ = zooming in), while active.
     dolly_sign: Option<f32>,
+    /// True while a precise-scroll gesture (trackpad two-finger drag) pans.
+    pub wheel_pan: bool,
 }
 
 impl Default for View {
@@ -61,6 +69,7 @@ impl Default for View {
             pan_prev_cursor: None,
             dolly_prev_x: None,
             dolly_sign: None,
+            wheel_pan: false,
         }
     }
 }
@@ -217,10 +226,28 @@ pub fn view_input(
 
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
 
-    // ---- Zoom: mouse wheel (anchored at the cursor) ----
-    if !mouse_busy && cursor.is_some() && scroll.delta.y != 0.0 {
-        let delta = scroll.delta.y as f64;
-        view.zoom_log(-delta * ZOOM_WHEEL_SENSITIVITY, cursor);
+    // ---- Scroll: wheel zooms, a trackpad two-finger drag pans ----
+    if !mouse_busy && cursor.is_some() && scroll.delta != Vec2::ZERO {
+        let ctrl = keys.pressed(KeyCode::ControlLeft)
+            || keys.pressed(KeyCode::ControlRight)
+            || keys.pressed(KeyCode::SuperLeft)
+            || keys.pressed(KeyCode::SuperRight);
+        let precise = scroll.unit == MouseScrollUnit::Pixel;
+        match scroll_unit_lines(&scroll) {
+            Some(lines) if precise && !ctrl => {
+                // Precise deltas follow the finger: dragging down scrolls the
+                // content up, which moves the camera the other way.
+                view.wheel_pan = true;
+                view.pan_pixels(lines, wpp);
+            }
+            Some(lines) => {
+                view.wheel_pan = false;
+                view.zoom_log(-lines.y as f64 * ZOOM_WHEEL_SENSITIVITY, cursor);
+            }
+            None => {}
+        }
+    } else if scroll.delta == Vec2::ZERO {
+        view.wheel_pan = false;
     }
 
     // ---- Zoom: Alt+RMB horizontal dolly ----
@@ -255,6 +282,51 @@ pub fn view_input(
     } else {
         view.pan_prev_cursor = None;
     }
+}
+
+/// A trackpad gesture that arrived as precise scrolling, tracked so the HUD
+/// and cursor logic can treat it like a drag while it lasts.
+///
+/// Winit reports the gesture phases in `MouseWheel::phase` (`Started`,
+/// `Moved`, `Ended`), while Bevy's accumulator only carries the summed delta.
+/// Watching the phase keeps the pan latched across a frame with no new delta,
+/// which is what makes a slow two-finger drag feel continuous.
+#[derive(Resource, Default)]
+pub struct WheelGesture {
+    /// True between `Started` and `Ended` of a precise-scroll gesture.
+    pub active: bool,
+}
+
+/// Track the precise-scroll gesture phase.
+pub fn track_wheel_gesture(
+    mut wheels: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut gesture: ResMut<WheelGesture>,
+) {
+    for wheel in wheels.read() {
+        if wheel.unit != MouseScrollUnit::Pixel {
+            continue;
+        }
+        match wheel.phase {
+            bevy::input::touch::TouchPhase::Started => gesture.active = true,
+            bevy::input::touch::TouchPhase::Ended | bevy::input::touch::TouchPhase::Canceled => {
+                gesture.active = false
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Scroll delta converted to wheel lines, so wheels and precision touchpads
+/// share one sensitivity.
+fn scroll_unit_lines(scroll: &AccumulatedMouseScroll) -> Option<Vec2> {
+    let delta = scroll.delta;
+    if delta == Vec2::ZERO {
+        return None;
+    }
+    Some(match scroll.unit {
+        MouseScrollUnit::Line => delta,
+        MouseScrollUnit::Pixel => delta / SCROLL_PIXELS_PER_LINE,
+    })
 }
 
 /// Exponentially smooth the view toward its target and pin the zoom anchor.
@@ -339,5 +411,47 @@ fn apply_to_camera(view: &View, transform: &mut Transform, projection: &mut Proj
     transform.translation.y = view.center.y as f32;
     if let Projection::Orthographic(ortho) = &mut *projection {
         ortho.scale = view.scale() as f32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scroll(unit: MouseScrollUnit, x: f32, y: f32) -> AccumulatedMouseScroll {
+        AccumulatedMouseScroll {
+            unit,
+            delta: Vec2::new(x, y),
+        }
+    }
+
+    #[test]
+    fn wheel_lines_pass_through() {
+        let lines = scroll_unit_lines(&scroll(MouseScrollUnit::Line, 0.0, 1.0)).unwrap();
+        assert_eq!(lines, Vec2::new(0.0, 1.0));
+    }
+
+    #[test]
+    fn precision_pixels_are_normalized_to_lines() {
+        // A trackpad gesture of 150 px must not be 150 wheel notches.
+        let lines = scroll_unit_lines(&scroll(MouseScrollUnit::Pixel, 0.0, 150.0)).unwrap();
+        assert!((lines.y - 1.5).abs() < 1e-6);
+        // Same magnitude as a wheel line reaches the zoom curve identically.
+        let wheel = scroll_unit_lines(&scroll(MouseScrollUnit::Line, 0.0, 100.0 / 100.0)).unwrap();
+        assert_eq!(wheel.y, 1.0);
+    }
+
+    #[test]
+    fn empty_scroll_is_none() {
+        assert!(scroll_unit_lines(&scroll(MouseScrollUnit::Pixel, 0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn pan_respects_the_scroll_direction() {
+        let mut view = View::default();
+        // Precise scroll down (content scrolls up) moves the camera up.
+        view.pan_pixels(Vec2::new(0.0, 100.0), 1.0);
+        assert!(view.center.y > 0.0);
+        assert_eq!(view.zoom_anchor, None);
     }
 }

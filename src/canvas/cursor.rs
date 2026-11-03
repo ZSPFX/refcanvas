@@ -85,7 +85,7 @@ pub fn update_cursor(
     } else if crate::canvas::egui_pointer_busy(&mut contexts) {
         // Over the HUD / menus: egui owns the cursor.
         None
-    } else if view.is_panning() {
+    } else if view.is_panning() || view.wheel_pan {
         Some(SystemCursorIcon::Grabbing)
     } else if let Some(sign) = view.dolly_sign() {
         Some(if sign > 0.0 {

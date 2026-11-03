@@ -121,6 +121,7 @@ impl Plugin for CanvasPlugin {
             .init_resource::<grid::GridFade>()
             .init_resource::<undo::UndoStack>()
             .init_resource::<camera::ViewMotion>()
+            .init_resource::<camera::WheelGesture>()
             .init_resource::<lod::FrameCounter>()
             .init_resource::<lod::GpuTextureState>()
             .init_resource::<lod::TexTuning>()
@@ -148,6 +149,7 @@ impl Plugin for CanvasPlugin {
                     track_chords,
                     touch::touch_input,
                     touch::apply_inertia,
+                    camera::track_wheel_gesture,
                     camera::view_input,
                     // Before `view_smooth`: focus/arrow hops must set their
                     // target (and thus the ease's redraw request) within the

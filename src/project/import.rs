@@ -231,10 +231,18 @@ pub fn dialog_import(
     keys: Res<ButtonInput<KeyCode>>,
     view: Res<View>,
     mut queue: ResMut<ImportQueue>,
+    mut dialogs: ResMut<crate::dialogs::Dialogs>,
+    mut dialog_results: ResMut<crate::dialogs::DialogResults>,
     mut contexts: EguiContexts,
     chord_mem: Res<crate::canvas::ChordMemory>,
     chord_frame: Res<crate::canvas::lod::FrameCounter>,
 ) {
+    // Finished pickers are collected first: the dialog itself never blocks.
+    if !dialog_results.files.is_empty() {
+        let paths = std::mem::take(&mut dialog_results.files);
+        enqueue_paths(&mut queue, view.center.as_vec2(), paths);
+    }
+
     let ctrl = crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0);
     if !(ctrl && keys.just_pressed(KeyCode::KeyI)) {
         return;
@@ -243,16 +251,7 @@ pub fn dialog_import(
     if egui_busy {
         return;
     }
-    let picked = rfd::FileDialog::new()
-        .set_title("Import reference images")
-        .add_filter(
-            "Images",
-            &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tga", "tif", "tiff"],
-        )
-        .pick_files();
-    if let Some(paths) = picked {
-        enqueue_paths(&mut queue, view.center.as_vec2(), paths);
-    }
+    dialogs.pick_images();
 }
 
 pub fn pump_import_queue(mut queue: ResMut<ImportQueue>, store: Res<ProjectStore>) {

@@ -115,6 +115,9 @@ pub struct TabRequests {
 pub enum TabRequest {
     /// Open (or create) the project rooted at this path (folder or .db file).
     Open(PathBuf),
+    /// Create a project in a folder that is not open yet: activates it even
+    /// when it is already a tab, so the picker always answers visibly.
+    OpenNew(PathBuf),
     /// Re-open a remembered project without changing the active tab.
     OpenRestored(PathBuf),
     Close(u64),
@@ -295,11 +298,24 @@ pub fn tab_shortcuts(
     mut contexts: EguiContexts,
     tabs: Res<Tabs>,
     mut requests: ResMut<TabRequests>,
+    mut dialogs: ResMut<crate::dialogs::Dialogs>,
+    mut dialog_results: ResMut<crate::dialogs::DialogResults>,
+    mut pick_is_new: Local<bool>,
     chord_mem: Res<crate::canvas::ChordMemory>,
     chord_frame: Res<crate::canvas::lod::FrameCounter>,
 ) {
     if egui_keyboard_busy(&mut contexts) {
         return;
+    }
+    if let Some(dir) = dialog_results.folders.pop() {
+        dialog_results.folders.clear();
+        let is_new = *pick_is_new;
+        *pick_is_new = false;
+        requests.queue.push(if is_new {
+            TabRequest::OpenNew(dir)
+        } else {
+            TabRequest::Open(dir)
+        });
     }
     if !crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0) {
         return;
@@ -307,20 +323,12 @@ pub fn tab_shortcuts(
     let shift = crate::canvas::shift_down(&keys, &chord_mem, chord_frame.0);
 
     if keys.just_pressed(KeyCode::KeyT) {
-        if let Some(dir) = rfd::FileDialog::new()
-            .set_title("New project: choose a folder")
-            .pick_folder()
-        {
-            requests.queue.push(TabRequest::Open(dir));
-        }
+        dialogs.pick_folder("New project: choose a folder");
+        *pick_is_new = true;
     }
     if keys.just_pressed(KeyCode::KeyO) {
-        if let Some(dir) = rfd::FileDialog::new()
-            .set_title("Open project: choose a folder")
-            .pick_folder()
-        {
-            requests.queue.push(TabRequest::Open(dir));
-        }
+        dialogs.pick_folder("Open project: choose a folder");
+        *pick_is_new = false;
     }
     if keys.just_pressed(KeyCode::KeyW) {
         if let Some(id) = tabs.active_id() {
@@ -379,6 +387,29 @@ pub fn process_requests(
                     }
                     Err(err) => {
                         warn!("failed to open {}: {err:#}", root.display());
+                        return;
+                    }
+                }
+            }
+        }
+        TabRequest::OpenNew(path) => {
+            let root = if path.is_dir() {
+                path
+            } else {
+                path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+            };
+            tabs.unavailable.retain(|pending| pending != &root);
+            if let Some(index) = tabs.stored.iter().position(|t| t.store.root == root) {
+                index
+            } else {
+                let id = tabs.new_id();
+                match open_tab_at(&root, id, &mut tabs.clock) {
+                    Ok(tab) => {
+                        tabs.stored.push(tab);
+                        tabs.stored.len() - 1
+                    }
+                    Err(err) => {
+                        warn!("failed to create project at {}: {err:#}", root.display());
                         return;
                     }
                 }

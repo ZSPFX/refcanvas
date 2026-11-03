@@ -20,7 +20,7 @@ use crate::canvas::node::{FrameLabel, NodeKind, NodeSnapshot, Pose};
 use crate::canvas::selection::{self, Interaction, NodeQ, Selection};
 use crate::canvas::undo::{UndoEntry, UndoStack, snapshot_of};
 use crate::clipboard::SystemClipboard;
-use crate::project::import::{ImportQueue, enqueue_paths};
+use crate::project::import::ImportQueue;
 use crate::project::tabs::{TabRequest, TabRequests, Tabs};
 use crate::theme::Accent;
 
@@ -246,9 +246,9 @@ fn context_menu_ui(
     window: Single<&Window, With<PrimaryWindow>>,
     mut grid_fade: ResMut<GridFade>,
     mut system_clipboard: ResMut<SystemClipboard>,
-    mut import_queue: ResMut<ImportQueue>,
     mut interaction: ResMut<Interaction>,
     mut undo: ResMut<UndoStack>,
+    mut dialogs: ResMut<crate::dialogs::Dialogs>,
     q_own: Query<
         (Entity, &crate::canvas::node::TabOwner),
         Without<crate::canvas::node::InactiveTab>,
@@ -435,18 +435,7 @@ fn context_menu_ui(
                 *interaction = Interaction::Idle;
             }
             MenuAction::ImportDialog => {
-                let picked = rfd::FileDialog::new()
-                    .set_title("Import reference images")
-                    .add_filter(
-                        "Images",
-                        &[
-                            "png", "jpg", "jpeg", "webp", "bmp", "gif", "tga", "tif", "tiff",
-                        ],
-                    )
-                    .pick_files();
-                if let Some(paths) = picked {
-                    enqueue_paths(&mut import_queue, view.center.as_vec2(), paths);
-                }
+                dialogs.pick_images();
             }
             MenuAction::PasteFromClipboard => {
                 crate::clipboard::request_paste(&mut system_clipboard, menu.world);
@@ -899,6 +888,11 @@ fn tab_bar(
     tabs: Res<Tabs>,
     mut requests: ResMut<TabRequests>,
     mut always_on_top: ResMut<AlwaysOnTop>,
+    mut dialogs: ResMut<crate::dialogs::Dialogs>,
+    mut dialog_results: ResMut<crate::dialogs::DialogResults>,
+    // A folder picker reports only its path, so remember which menu entry
+    // asked for it until the result arrives.
+    mut folder_pick_is_new: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let mut pending: Vec<TabRequest> = Vec::new();
@@ -1065,20 +1059,24 @@ fn tab_bar(
         )
     });
 
-    if open_new {
-        if let Some(dir) = rfd::FileDialog::new()
-            .set_title("New project: choose a folder")
-            .pick_folder()
-        {
-            pending.push(TabRequest::Open(dir));
-        }
+    // Folder pickers resolve asynchronously; their results arrive here.
+    if let Some(dir) = dialog_results.folders.pop() {
+        dialog_results.folders.clear();
+        let new_project = *folder_pick_is_new;
+        *folder_pick_is_new = false;
+        pending.push(if new_project {
+            TabRequest::OpenNew(dir)
+        } else {
+            TabRequest::Open(dir)
+        });
     }
-    if open_existing {
-        if let Some(dir) = rfd::FileDialog::new()
-            .set_title("Open project: choose a folder")
-            .pick_folder()
-        {
-            pending.push(TabRequest::Open(dir));
+    if !dialogs.is_open() {
+        if open_new {
+            dialogs.pick_folder("New project: choose a folder");
+            *folder_pick_is_new = true;
+        }
+        if open_existing {
+            dialogs.pick_folder("Open project: choose a folder");
         }
     }
 

@@ -7,12 +7,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bevy::ecs::system::NonSendMarker;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
+use crate::dialogs::{DialogResults, Dialogs, MessageId};
 use crate::project::local;
 
 const API_URL: &str = "https://api.github.com/repos/ZSPFX/refcanvas/releases/latest";
@@ -25,7 +25,7 @@ impl Plugin for UpdatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UpdateStatus>()
             .add_systems(Startup, start_check)
-            .add_systems(Update, poll_check);
+            .add_systems(Update, (poll_check, answer_prompt).chain());
     }
 }
 
@@ -138,7 +138,7 @@ fn start_check(mut status: ResMut<UpdateStatus>) {
     });
 }
 
-fn poll_check(_: NonSendMarker, mut status: ResMut<UpdateStatus>, mut contexts: EguiContexts) {
+fn poll_check(mut status: ResMut<UpdateStatus>, mut dialogs: ResMut<Dialogs>) {
     let Some(slot) = status.pending.clone() else {
         return;
     };
@@ -184,32 +184,48 @@ fn poll_check(_: NonSendMarker, mut status: ResMut<UpdateStatus>, mut contexts: 
 
     if should_prompt {
         status.prompted_this_run = true;
-        let accepted = show_dialog(&latest);
-        status.stored.prompted_version = Some(latest_text.clone());
-        if accepted {
-            open_url(&mut contexts, &latest.url);
-        } else {
-            status.stored.declined_version = Some(latest_text);
-            status.declined = true;
-        }
+        status.stored.prompted_version = Some(latest_text);
         status.stored.save();
+        // The dialog is native and asynchronous: the answer arrives in
+        // `answer_prompt` while the app keeps rendering.
+        dialogs.ask(
+            "Update available",
+            prompt_text(&latest),
+            MessageId::UpdateAvailable {
+                version: latest.version.to_string(),
+                url: latest.url,
+            },
+        );
     } else if status.stored.declined_version.as_deref() == Some(latest_text.as_str()) {
         status.declined = true;
     }
 }
 
-fn show_dialog(latest: &Latest) -> bool {
-    let text = format!(
+/// Handle the user's answer to the update prompt.
+fn answer_prompt(
+    mut status: ResMut<UpdateStatus>,
+    mut results: ResMut<DialogResults>,
+    mut contexts: EguiContexts,
+) {
+    let answers: Vec<(MessageId, rfd::MessageDialogResult)> = std::mem::take(&mut results.messages);
+    for (id, answer) in answers {
+        let MessageId::UpdateAvailable { version, url } = id;
+        if matches!(answer, rfd::MessageDialogResult::Yes) {
+            open_url(&mut contexts, &url);
+        } else {
+            status.stored.declined_version = Some(version);
+            status.declined = true;
+            status.stored.save();
+        }
+    }
+}
+
+fn prompt_text(latest: &Latest) -> String {
+    format!(
         "refcanvas v{} is available. You have v{}. Open the release page to download it?",
         latest.version,
         env!("CARGO_PKG_VERSION")
-    );
-    let dialog = rfd::MessageDialog::new()
-        .set_title("Update available")
-        .set_description(text)
-        .set_level(rfd::MessageLevel::Info)
-        .set_buttons(rfd::MessageButtons::YesNo);
-    matches!(dialog.show(), rfd::MessageDialogResult::Yes)
+    )
 }
 
 fn open_url(contexts: &mut EguiContexts, url: &str) {

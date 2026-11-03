@@ -24,6 +24,10 @@ const MIN_LOG_SCALE: f64 = -7.0;
 const MAX_LOG_SCALE: f64 = 11.0;
 /// Log-zoom change per wheel line.
 const ZOOM_WHEEL_SENSITIVITY: f64 = 0.16;
+/// Log-zoom change per unit of pinch magnification. A full-finger pinch reports
+/// a magnification of roughly a few tenths per event, so this needs to be much
+/// larger than the per-line wheel gain to feel comparable.
+const PINCH_SENSITIVITY: f64 = 4.0;
 /// Scroll pixels that count as one wheel line. Precision touchpads report
 /// pixels (a gesture is tens to hundreds of them), wheels report lines; both
 /// must reach the zoom curve at comparable magnitudes.
@@ -210,6 +214,8 @@ pub fn view_input(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     scroll: Res<AccumulatedMouseScroll>,
+    gesture: Res<WheelGesture>,
+    mut pinch: MessageReader<bevy::input::gestures::PinchGesture>,
     camera: Single<(&Camera, &GlobalTransform)>,
     pointer: Res<super::touch::Pointer>,
     mut view: ResMut<View>,
@@ -232,19 +238,19 @@ pub fn view_input(
             || keys.pressed(KeyCode::ControlRight)
             || keys.pressed(KeyCode::SuperLeft)
             || keys.pressed(KeyCode::SuperRight);
-        let precise = scroll.unit == MouseScrollUnit::Pixel;
-        match scroll_unit_lines(&scroll) {
-            Some(lines) if precise && !ctrl => {
-                // Precise deltas follow the finger: dragging down scrolls the
-                // content up, which moves the camera the other way.
+        let action = scroll_action(gesture.active, ctrl);
+        match (scroll_unit_lines(&scroll), action) {
+            (Some(lines), ScrollAction::Pan) => {
+                // Deltas follow the finger: dragging down scrolls the content
+                // up, which moves the camera the other way.
                 view.wheel_pan = true;
                 view.pan_pixels(lines, wpp);
             }
-            Some(lines) => {
+            (Some(lines), ScrollAction::Zoom) => {
                 view.wheel_pan = false;
                 view.zoom_log(-lines.y as f64 * ZOOM_WHEEL_SENSITIVITY, cursor);
             }
-            None => {}
+            (None, _) => {}
         }
     } else if scroll.delta == Vec2::ZERO {
         view.wheel_pan = false;
@@ -266,6 +272,15 @@ pub fn view_input(
     } else {
         view.dolly_prev_x = None;
         view.dolly_sign = None;
+    }
+
+    // ---- Zoom: trackpad pinch ----
+    // winit reports magnification with the opposite sign to the wheel: a
+    // spread (zoom in) is negative. The zoom is anchored at the cursor, like
+    // the wheel.
+    let magnification: f32 = pinch.read().map(|pinch| pinch.0).sum();
+    if !mouse_busy && magnification != 0.0 {
+        view.zoom_log(-(magnification as f64) * PINCH_SENSITIVITY, cursor);
     }
 
     // ---- Pan: MMB drag, Space+LMB drag, or Alt+MMB drag ----
@@ -303,9 +318,8 @@ pub fn track_wheel_gesture(
     mut gesture: ResMut<WheelGesture>,
 ) {
     for wheel in wheels.read() {
-        if wheel.unit != MouseScrollUnit::Pixel {
-            continue;
-        }
+        // Only a trackpad reports a real gesture lifecycle. A classic wheel
+        // sends `Moved` for every notch, which must never latch a pan.
         match wheel.phase {
             bevy::input::touch::TouchPhase::Started => gesture.active = true,
             bevy::input::touch::TouchPhase::Ended | bevy::input::touch::TouchPhase::Canceled => {
@@ -313,6 +327,23 @@ pub fn track_wheel_gesture(
             }
             _ => {}
         }
+    }
+}
+
+/// Why scroll input is being handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollAction {
+    Pan,
+    Zoom,
+}
+
+/// Trackpad gestures pan; anything with a zoom modifier, and any device that
+/// does not report a gesture (a classic wheel), zooms.
+fn scroll_action(gesture_active: bool, zoom_modifier: bool) -> ScrollAction {
+    if gesture_active && !zoom_modifier {
+        ScrollAction::Pan
+    } else {
+        ScrollAction::Zoom
     }
 }
 
@@ -439,6 +470,17 @@ mod tests {
         // Same magnitude as a wheel line reaches the zoom curve identically.
         let wheel = scroll_unit_lines(&scroll(MouseScrollUnit::Line, 0.0, 100.0 / 100.0)).unwrap();
         assert_eq!(wheel.y, 1.0);
+    }
+
+    #[test]
+    fn only_trackpad_gestures_pan() {
+        // A classic wheel never reports a gesture: it must zoom.
+        assert_eq!(scroll_action(false, false), ScrollAction::Zoom);
+        // Two-finger trackpad drag pans.
+        assert_eq!(scroll_action(true, false), ScrollAction::Pan);
+        // Cmd/Ctrl always means zoom, even mid-gesture.
+        assert_eq!(scroll_action(true, true), ScrollAction::Zoom);
+        assert_eq!(scroll_action(false, true), ScrollAction::Zoom);
     }
 
     #[test]

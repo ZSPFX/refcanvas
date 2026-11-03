@@ -379,16 +379,6 @@ fn limit_fps(
 /// the HUD's fps readout, which shows this rate while the loop naps.
 pub(crate) const IDLE_HEARTBEAT: Duration = Duration::from_secs(1);
 
-/// Marker for resources that may only be touched on the main thread (opaque
-/// platform handles, or futures that must be polled there).
-#[derive(Default)]
-pub(crate) struct MainThreadOnly;
-
-// SAFETY: nothing reads these off the main thread; the marker documents the
-// invariant Bevy's thread-safe `Resource` bound does not express.
-unsafe impl Send for MainThreadOnly {}
-unsafe impl Sync for MainThreadOnly {}
-
 /// Drops the loop to ~1 fps whenever there is nothing to do, focused or not,
 /// but only when there is no background work in flight.
 ///

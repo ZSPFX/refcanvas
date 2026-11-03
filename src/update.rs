@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use semver::Version;
@@ -29,7 +30,8 @@ impl Plugin for UpdatePlugin {
     }
 }
 
-/// What the status bar needs to render the declined-update badge.
+/// Update availability, and the badge shown while the running version is older
+/// than the latest release.
 #[derive(Resource, Default)]
 pub struct UpdateStatus {
     pub latest: Option<Version>,
@@ -40,11 +42,16 @@ pub struct UpdateStatus {
 }
 
 impl UpdateStatus {
+    /// The yellow status label, or `None` when the app is up to date or no
+    /// newer release is known.
     pub fn badge_text(&self) -> Option<String> {
         if !self.declined {
             return None;
         }
         let latest = self.latest.as_ref()?;
+        if latest <= &current_version() {
+            return None;
+        }
         Some(format!(
             "v{} (v{latest} latest. please update)",
             env!("CARGO_PKG_VERSION")
@@ -138,7 +145,7 @@ fn start_check(mut status: ResMut<UpdateStatus>) {
     });
 }
 
-fn poll_check(mut status: ResMut<UpdateStatus>, mut dialogs: ResMut<Dialogs>) {
+fn poll_check(mut status: ResMut<UpdateStatus>, mut dialogs: NonSendMut<Dialogs>) {
     let Some(slot) = status.pending.clone() else {
         return;
     };
@@ -210,13 +217,15 @@ fn answer_prompt(
     let answers: Vec<(MessageId, rfd::MessageDialogResult)> = std::mem::take(&mut results.messages);
     for (id, answer) in answers {
         let MessageId::UpdateAvailable { version, url } = id;
+        // Both answers leave the badge up: opening the release page does not
+        // install anything, and the running version is still old until the
+        // user replaces it. The badge clears by itself once the app is updated.
         if matches!(answer, rfd::MessageDialogResult::Yes) {
             open_url(&mut contexts, &url);
-        } else {
-            status.stored.declined_version = Some(version);
-            status.declined = true;
-            status.stored.save();
         }
+        status.stored.declined_version = Some(version);
+        status.declined = true;
+        status.stored.save();
     }
 }
 
@@ -286,6 +295,35 @@ mod tests {
         assert_eq!(parse_tag("0.2.0").unwrap(), Version::new(0, 2, 0));
         assert_eq!(parse_tag(" v1.2.3 ").unwrap(), Version::new(1, 2, 3));
         assert!(parse_tag("not-a-version").is_err());
+    }
+
+    /// Build just enough status to exercise the badge rules. The running
+    /// version comes from Cargo.toml, so the test derives neighbours from it
+    /// instead of hard-coding release numbers.
+    fn badge(latest: Option<&str>, acknowledged: bool) -> Option<String> {
+        let status = UpdateStatus {
+            latest: latest.and_then(|v| Version::parse(v).ok()),
+            declined: acknowledged,
+            ..Default::default()
+        };
+        status.badge_text()
+    }
+
+    #[test]
+    fn badge_shows_only_for_a_newer_acknowledged_release() {
+        let current = current_version();
+        let newer = format!("{}.{}.{}", current.major, current.minor, current.patch + 1);
+        let same = current.to_string();
+        let older = format!("{}.{}.{}", current.major, current.minor, current.patch.saturating_sub(1));
+
+        // Newer + acknowledged (Yes or No both acknowledge) -> badge.
+        assert!(badge(Some(&newer), true).is_some_and(|text| text.contains(&newer)));
+        // Newer but not acknowledged -> no badge yet.
+        assert_eq!(badge(Some(&newer), false), None);
+        // Same or older version -> no badge, even if a stale entry exists.
+        assert_eq!(badge(Some(&same), true), None);
+        assert_eq!(badge(Some(&older), true), None);
+        assert_eq!(badge(None, true), None);
     }
 
     #[test]

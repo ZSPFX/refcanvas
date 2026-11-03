@@ -248,7 +248,7 @@ fn context_menu_ui(
     mut system_clipboard: ResMut<SystemClipboard>,
     mut interaction: ResMut<Interaction>,
     mut undo: ResMut<UndoStack>,
-    mut dialogs: ResMut<crate::dialogs::Dialogs>,
+    mut dialogs: NonSendMut<crate::dialogs::Dialogs>,
     q_own: Query<
         (Entity, &crate::canvas::node::TabOwner),
         Without<crate::canvas::node::InactiveTab>,
@@ -888,7 +888,7 @@ fn tab_bar(
     tabs: Res<Tabs>,
     mut requests: ResMut<TabRequests>,
     mut always_on_top: ResMut<AlwaysOnTop>,
-    mut dialogs: ResMut<crate::dialogs::Dialogs>,
+    mut dialogs: NonSendMut<crate::dialogs::Dialogs>,
     mut dialog_results: ResMut<crate::dialogs::DialogResults>,
     // A folder picker reports only its path, so remember which menu entry
     // asked for it until the result arrives.

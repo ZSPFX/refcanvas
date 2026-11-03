@@ -298,7 +298,7 @@ pub fn tab_shortcuts(
     mut contexts: EguiContexts,
     tabs: Res<Tabs>,
     mut requests: ResMut<TabRequests>,
-    mut dialogs: ResMut<crate::dialogs::Dialogs>,
+    mut dialogs: NonSendMut<crate::dialogs::Dialogs>,
     mut dialog_results: ResMut<crate::dialogs::DialogResults>,
     mut pick_is_new: Local<bool>,
     chord_mem: Res<crate::canvas::ChordMemory>,

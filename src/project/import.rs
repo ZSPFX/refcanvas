@@ -231,7 +231,7 @@ pub fn dialog_import(
     keys: Res<ButtonInput<KeyCode>>,
     view: Res<View>,
     mut queue: ResMut<ImportQueue>,
-    mut dialogs: ResMut<crate::dialogs::Dialogs>,
+    mut dialogs: NonSendMut<crate::dialogs::Dialogs>,
     mut dialog_results: ResMut<crate::dialogs::DialogResults>,
     mut contexts: EguiContexts,
     chord_mem: Res<crate::canvas::ChordMemory>,

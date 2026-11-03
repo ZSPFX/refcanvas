@@ -76,6 +76,8 @@ For Windows installation see the [releases](https://github.com/zspfx/refcanvas/r
 
 Dawin-only artifacts will be compiled through GitHub Actions once a new release is published, you may find them here in [releases](https://github.com/zspfx/refcanvas/releases) page.
 
+Unzip the file first then move `RefCanvas.app` into `/Applications`. After that, remove the quarantine flag using `xattr -cr /Applications/RefCanvas.app`.
+
 ## License
 
 Copyright (C) 2026 ZSPFX. RefCanvas is free software under **GPL-3.0-or-later**;

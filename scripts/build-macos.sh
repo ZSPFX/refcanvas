@@ -9,6 +9,8 @@
 # Env knobs:
 #   MACOS_SIGN_IDENTITY   Developer ID identity; defaults to ad-hoc ("-")
 #   MACOSX_DEPLOYMENT_TARGET  minimum macOS version (default 11.0)
+#   CARGO_TARGET_DIR      honoured by cargo and `cargo metadata`; CI pins it so
+#                         the build cache and the binary lookup agree
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -41,16 +41,31 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      # `shared-key` + `key` lets the restore fall back to the newest cache for
+      # this workflow instead of demanding an exact match. Cargo then rebuilds
+      # only the crates whose sources actually changed.
       - uses: Swatinem/rust-cache@v2
         with:
-          # Dependencies dominate the build; key the cache on the manifest.
           shared-key: macos-release
+          key: arm64
+          # The build dir must match CARGO_TARGET_DIR below, or the restore
+          # lands somewhere the script never looks.
           workspaces: ". -> target"
+          # A packaging failure after a successful compile must not throw the
+          # compilation away.
+          cache-on-failure: true
 
       - name: Build the app bundle
         env:
+          # Pinned so `cargo metadata`'s target_directory equals the cached one.
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
           REF_RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: ./scripts/build-macos.sh
+
+      - name: Build statistics
+        run: |
+          du -sh target 2>/dev/null || true
+          echo "cached rlibs: $(ls target/aarch64-apple-darwin/release/deps 2>/dev/null | wc -l)"
 
       - name: Attach the artifact to the release
         env:

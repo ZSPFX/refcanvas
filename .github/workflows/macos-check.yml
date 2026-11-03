@@ -33,9 +33,16 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      # Separate key from the release job: mixing `cargo check` objects with a
+      # `--release` build causes more churn than it saves.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-check
+          key: arm64
           workspaces: ". -> target"
+          cache-on-failure: true
 
-      - run: cargo check --locked --target aarch64-apple-darwin
+      - name: Check the macOS target
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: cargo check --locked --target aarch64-apple-darwin

@@ -27,7 +27,11 @@ const ZOOM_WHEEL_SENSITIVITY: f64 = 0.16;
 /// Log-zoom change per unit of pinch magnification. A full-finger pinch reports
 /// a magnification of roughly a few tenths per event, so this needs to be much
 /// larger than the per-line wheel gain to feel comparable.
-const PINCH_SENSITIVITY: f64 = 4.0;
+const PINCH_SENSITIVITY: f64 = 1.5;
+/// Pan speed for precision-scroll gestures. A trackpad reports raw device
+/// pixels, so following them 1:1 feels sluggish. `TWO_FINGER_PAN_GAIN` scales
+/// the gesture into canvas motion.
+const PAN_GAIN: f32 = 2.0;
 /// Scroll pixels that count as one wheel line. Precision touchpads report
 /// pixels (a gesture is tens to hundreds of them), wheels report lines; both
 /// must reach the zoom curve at comparable magnitudes.
@@ -233,18 +237,20 @@ pub fn view_input(
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
 
     // ---- Scroll: wheel zooms, a trackpad two-finger drag pans ----
+    let zoom_modifier = keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight)
+        || keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight);
     if !mouse_busy && cursor.is_some() && scroll.delta != Vec2::ZERO {
-        let ctrl = keys.pressed(KeyCode::ControlLeft)
-            || keys.pressed(KeyCode::ControlRight)
-            || keys.pressed(KeyCode::SuperLeft)
-            || keys.pressed(KeyCode::SuperRight);
-        let action = scroll_action(gesture.active, ctrl);
+        let action = scroll_action(gesture.active, zoom_modifier);
         match (scroll_unit_lines(&scroll), action) {
-            (Some(lines), ScrollAction::Pan) => {
+            (Some(delta), ScrollAction::Pan) => {
                 // Deltas follow the finger: dragging down scrolls the content
-                // up, which moves the camera the other way.
+                // up, which moves the camera the other way. Pan straight from
+                // the device pixels (not the line conversion) and scale them
+                // so the canvas tracks the hand at a natural speed.
                 view.wheel_pan = true;
-                view.pan_pixels(lines, wpp);
+                view.pan_pixels(delta * PAN_GAIN, wpp);
             }
             (Some(lines), ScrollAction::Zoom) => {
                 view.wheel_pan = false;
@@ -252,7 +258,11 @@ pub fn view_input(
             }
             (None, _) => {}
         }
-    } else if scroll.delta == Vec2::ZERO {
+    }
+    // Keep the grabbing cursor through the quiet frames of a gesture (the
+    // deltas arrive in bursts); drop it as soon as the gesture ends or a zoom
+    // modifier takes over.
+    if !(gesture.active && !zoom_modifier && !mouse_busy) {
         view.wheel_pan = false;
     }
 
@@ -279,7 +289,7 @@ pub fn view_input(
     // spread (zoom in) is negative. The zoom is anchored at the cursor, like
     // the wheel.
     let magnification: f32 = pinch.read().map(|pinch| pinch.0).sum();
-    if !mouse_busy && magnification != 0.0 {
+    if !mouse_busy && magnification.is_finite() && magnification != 0.0 {
         view.zoom_log(-(magnification as f64) * PINCH_SENSITIVITY, cursor);
     }
 
@@ -319,7 +329,12 @@ pub fn track_wheel_gesture(
 ) {
     for wheel in wheels.read() {
         // Only a trackpad reports a real gesture lifecycle. A classic wheel
-        // sends `Moved` for every notch, which must never latch a pan.
+        // sends `Moved` for every notch, which must never latch a pan; a line
+        // event also clears a gesture left dangling by a lost end event.
+        if wheel.unit == MouseScrollUnit::Line {
+            gesture.active = false;
+            continue;
+        }
         match wheel.phase {
             bevy::input::touch::TouchPhase::Started => gesture.active = true,
             bevy::input::touch::TouchPhase::Ended | bevy::input::touch::TouchPhase::Canceled => {

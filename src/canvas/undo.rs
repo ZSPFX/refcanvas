@@ -1,13 +1,13 @@
-//! Undo / redo (Ctrl+Z / Ctrl+Shift+Z, Ctrl+Y).
+//! Undo / redo (Cmd+Z / Cmd+Shift+Z / Cmd+Y on macOS, Ctrl elsewhere).
 //!
-//! The shortcut is matched on the *logical* key, not the physical position, so
-//! a QWERTZ keyboard (Z and Y swapped) behaves like it reads on the keycaps.
+//! The shortcut is matched on the *physical* key position, deliberately
+//! independent of the keyboard layout: the bottom-left key next to X always
+//! undoes, and the top-row key next to T always redoes. On a QWERTZ board those
+//! are labelled Y and Z respectively.
 //!
 //! Entries are snapshots, not diffs: transforms restore exactly, and
 //! add/remove entries carry the node data needed to respawn entities.
 
-use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
@@ -198,7 +198,6 @@ pub fn records_of(
 /// undoes with the key labelled Z and redos with the key labelled Y.
 pub fn undo_redo(
     keys: Res<ButtonInput<KeyCode>>,
-    mut presses: MessageReader<KeyboardInput>,
     chord_mem: Res<crate::canvas::ChordMemory>,
     chord_frame: Res<super::lod::FrameCounter>,
     mut contexts: EguiContexts,
@@ -211,46 +210,18 @@ pub fn undo_redo(
     if super::egui_keyboard_busy(&mut contexts) {
         return;
     }
-    let ctrl = crate::canvas::command_down(&keys, &chord_mem, chord_frame.0);
+    let command = crate::canvas::command_down(&keys, &chord_mem, chord_frame.0);
     let shift = crate::canvas::shift_down(&keys, &chord_mem, chord_frame.0);
 
-    // Decide from the *logical* letters, so a QWERTZ keyboard (Z and Y swapped)
-    // undo/redos exactly as the keycaps read. Matching by letter keeps the
-    // classic Ctrl+Y redo while making Ctrl+Z (typed on the physical Y key)
-    // undo as well.
-    let mut undo_pressed = false;
-    let mut redo_pressed = false;
-    let mut saw_character = false;
-    for input in presses.read() {
-        if input.state != ButtonState::Pressed || input.repeat {
-            continue;
-        }
-        let Key::Character(text) = &input.logical_key else {
-            continue;
-        };
-        saw_character = true;
-        let letter = text.chars().next().map(|c| c.to_ascii_lowercase());
-        match letter {
-            Some('z') if !shift => undo_pressed = true,
-            Some('z') => redo_pressed = true,
-            // `ctrl` keeps Ctrl+Y a redo and leaves a bare `y` free for tools.
-            Some('y') if ctrl => redo_pressed = true,
-            _ => {}
-        }
-    }
-
-    // Fall back to the physical keys when the platform reported no character
-    // (some IMEs and remote sessions), so the shortcut never goes dead. On a
-    // QWERTZ layout the Y key *is* the undo key, hence both codes here.
-    let undo = undo_pressed
-        || (!saw_character
-            && (keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::KeyY))
-            && !shift
-            && !redo_pressed
-            && !ctrl);
-    let redo = redo_pressed
-        || (!saw_character && keys.just_pressed(KeyCode::KeyZ) && shift)
-        || (!saw_character && ctrl && keys.just_pressed(KeyCode::KeyY));
+    // `KeyCode` names the US physical position, so this is layout-independent:
+    // `KeyZ` is the bottom-left key (labelled Y on QWERTZ) and `KeyY` is the
+    // top-row key (labelled Z on QWERTZ).
+    let (undo, redo) = undo_redo_intent(
+        keys.just_pressed(KeyCode::KeyZ),
+        keys.just_pressed(KeyCode::KeyY),
+        command,
+        shift,
+    );
 
     if !undo && !redo {
         return;
@@ -266,6 +237,12 @@ pub fn undo_redo(
         let undo_entry = apply(entry, &mut commands, &mut zc, &active, &mut q, false);
         stack.past.push(undo_entry);
     }
+}
+
+/// Physical-key mapping: `z` is the bottom-left key next to X, `y` the top-row
+/// key next to T. The modifier is Cmd on macOS, Ctrl elsewhere.
+fn undo_redo_intent(z: bool, y: bool, command: bool, shift: bool) -> (bool, bool) {
+    (z && !shift, (z && shift) || (command && y))
 }
 
 /// Apply an entry in reverse (`undoing`) or forward direction; returns the
@@ -317,5 +294,26 @@ fn apply(
             }
             UndoEntry::Removed { items }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::undo_redo_intent;
+
+    #[test]
+    fn undo_uses_the_bottom_left_key_regardless_of_layout() {
+        // Bottom-left physical key (labelled Y on QWERTZ): bare or with the
+        // command modifier, with or without Shift.
+        assert_eq!(undo_redo_intent(true, false, false, false), (true, false));
+        assert_eq!(undo_redo_intent(true, false, true, false), (true, false));
+        assert_eq!(undo_redo_intent(true, false, true, true), (false, true));
+    }
+
+    #[test]
+    fn redo_uses_the_top_row_key_with_the_command_modifier() {
+        // Top-row physical key (labelled Z on QWERTZ) only redoes with Cmd/Ctrl.
+        assert_eq!(undo_redo_intent(false, true, true, false), (false, true));
+        assert_eq!(undo_redo_intent(false, true, false, false), (false, false));
     }
 }

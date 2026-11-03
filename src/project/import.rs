@@ -18,7 +18,7 @@ use bevy::window::{FileDragAndDrop, PrimaryWindow};
 use bevy_egui::EguiContexts;
 
 use crate::canvas::camera::View;
-use crate::canvas::manipulate::{ZCounter, spawn_image_node};
+use crate::canvas::manipulate::{ZCounter, spawn_image_node_with_z};
 use crate::canvas::node::{ImageData, NodeSnapshot, Pose, to_bevy_image};
 use crate::canvas::undo::{NodeData, NodeRecord, UndoEntry, UndoStack};
 use crate::project::tabs::Tabs;
@@ -40,8 +40,23 @@ enum ImportSource {
     /// A file on disk (drag & drop, dialog, clipboard `text/uri-list`, …).
     File(PathBuf),
     /// Pixels read from the system clipboard: there is no source file, so
-    /// they are encoded as PNG and stored like any other import.
-    Pixels { name: String, image: image::RgbaImage },
+    /// they are encoded as PNG and stored like any other import. `placement`
+    /// is set when the copy came from refcanvas itself and carries the node
+    /// transforms to restore instead of resetting them.
+    Pixels {
+        name: String,
+        image: image::RgbaImage,
+        placement: Option<PastedPlacement>,
+    },
+}
+
+/// Placement to restore for a pasted clipboard image. The pixels are the
+/// already-cropped/flattened copy, so only the display transform is kept; the
+/// crop becomes the whole pasted image.
+#[derive(Clone, Copy, Debug)]
+pub struct PastedPlacement {
+    pub size: Vec2,
+    pub z: f32,
 }
 
 impl ImportSource {
@@ -69,6 +84,8 @@ pub struct StartupImport(pub PathBuf);
 struct Incoming {
     index: usize,
     result: anyhow::Result<ImportedImage>,
+    /// Set for clipboard pastes that carry an in-app placement.
+    placement: Option<PastedPlacement>,
 }
 
 struct ImportedImage {
@@ -115,10 +132,15 @@ pub fn enqueue_paths(queue: &mut ImportQueue, spawn_center: Vec2, paths: Vec<Pat
 }
 
 /// Queue pixels pasted from the system clipboard as a single import.
+///
+/// `placement` is the display size and stacking order recorded when the copy
+/// came from refcanvas. Rotation, flips and crop are already baked into the
+/// pasted pixels by the export step, so they must not be applied again.
 pub fn enqueue_clipboard_image(
     queue: &mut ImportQueue,
     spawn_center: Vec2,
     image: image::RgbaImage,
+    placement: Option<PastedPlacement>,
 ) {
     enqueue_sources(
         queue,
@@ -126,6 +148,7 @@ pub fn enqueue_clipboard_image(
         vec![ImportSource::Pixels {
             name: "clipboard.png".to_string(),
             image,
+            placement,
         }],
     );
 }
@@ -260,9 +283,19 @@ pub fn pump_import_queue(mut queue: ResMut<ImportQueue>, store: Res<ProjectStore
             break;
         };
         let store = store.clone();
+        // The placement belongs to the decoded pixels: grab it before the
+        // source moves onto the worker.
+        let placement = match &source {
+            ImportSource::Pixels { placement, .. } => *placement,
+            ImportSource::File(_) => None,
+        };
         let task = AsyncComputeTaskPool::get().spawn(async move {
             let result = import_one(&store, source);
-            Incoming { index, result }
+            Incoming {
+                index,
+                result,
+                placement,
+            }
         });
         queue.in_flight.push(task);
     }
@@ -297,37 +330,58 @@ pub fn collect_imports(
     for incoming in done {
         match incoming.result {
             Ok(imported) => {
-                let handle = images.add(imported.preview);
-                let crop = ImageData::full_crop(imported.natural);
-                let px_scale = ImageData::default_px_scale(imported.natural);
+                // A pasted image is already cropped and flattened, so its
+                // stored crop is the whole file. A refcanvas copy restores the
+                // original display size and z; a foreign image lands
+                // axis-aligned on the cursor.
+                let natural = imported.natural;
+                let crop = ImageData::full_crop(natural);
+                let (pose, px_scale, z) = match incoming.placement {
+                    Some(placement) => {
+                        let natural_f = natural.as_vec2().max(Vec2::ONE);
+                        let px_scale = (placement.size.x / natural_f.x)
+                            .max(placement.size.y / natural_f.y)
+                            .max(1e-4);
+                        (
+                            Pose {
+                                center: queue.batch_center,
+                                size: crop.size() * px_scale,
+                                rot: 0.0,
+                            },
+                            px_scale,
+                            placement.z,
+                        )
+                    }
+                    None => {
+                        let px_scale = ImageData::default_px_scale(natural);
+                        (
+                            Pose {
+                                center: queue.batch_center
+                                    + grid_cell_offset(incoming.index, total),
+                                size: crop.size() * px_scale,
+                                rot: 0.0,
+                            },
+                            px_scale,
+                            zc.next(),
+                        )
+                    }
+                };
+                zc.0 = zc.0.max(z);
                 let data = ImageData {
                     rel_path: imported.rel_path,
                     abs_path: imported.abs_path,
                     orig_name: imported.orig_name,
                     hash: imported.hash,
-                    natural: imported.natural,
-                    preview: handle,
+                    natural,
+                    preview: images.add(imported.preview),
                     preview_size: imported.preview_size,
                     preview_pending: false, // the preview arrives with the node
                     crop,
                     px_scale,
                 };
-                let size = crop.size() * px_scale;
-                let center = queue.batch_center + grid_cell_offset(incoming.index, total);
-                let pose = Pose {
-                    center,
-                    size,
-                    rot: 0.0,
-                };
                 let data_for_record = data.clone();
-                let (entity, z) = spawn_image_node(
-                    &mut commands,
-                    &mut zc,
-                    tab_id,
-                    true,
-                    data,
-                    pose,
-                );
+                let entity =
+                    spawn_image_node_with_z(&mut commands, data, pose, tab_id, true, z, false, false);
                 imported_records.push(NodeRecord {
                     entity,
                     tab_id,
@@ -386,7 +440,7 @@ fn import_one(store: &ProjectStore, source: ImportSource) -> anyhow::Result<Impo
             let dyn_img = image::load_from_memory(&bytes)?;
             (bytes, dyn_img, ext, orig_name)
         }
-        ImportSource::Pixels { name, image } => {
+        ImportSource::Pixels { name, image, .. } => {
             // Clipboard pixels have no source file: store them as PNG.
             let bytes = encode_png(&image)?;
             (

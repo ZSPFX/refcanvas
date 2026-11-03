@@ -89,6 +89,7 @@ pub fn union_aabb(poses: &[Pose]) -> Option<Rect> {
     Some(r)
 }
 
+#[allow(dead_code)]
 pub fn spawn_image_node(
     commands: &mut Commands,
     zc: &mut ZCounter,
@@ -98,7 +99,10 @@ pub fn spawn_image_node(
     pose: Pose,
 ) -> (Entity, f32) {
     let z = zc.next();
-    (spawn_image_node_with_z(commands, data, pose, tab_id, visible, z), z)
+    (
+        spawn_image_node_with_z(commands, data, pose, tab_id, visible, z, false, false),
+        z,
+    )
 }
 
 pub fn spawn_image_node_with_z(
@@ -108,6 +112,8 @@ pub fn spawn_image_node_with_z(
     tab_id: u64,
     visible: bool,
     z: f32,
+    flip_x: bool,
+    flip_y: bool,
 ) -> Entity {
     let preview = data.preview.clone();
     // Preview tier: scale the crop into the preview texture's pixel space
@@ -134,6 +140,8 @@ pub fn spawn_image_node_with_z(
                 image: preview,
                 custom_size: Some(pose.size),
                 rect,
+                flip_x,
+                flip_y,
                 ..default()
             },
             Transform {
@@ -643,7 +651,8 @@ pub fn duplicate_selection(
         let mut pose = current_pose(tf, node);
         pose.center += offset;
         let z = zc.next();
-        let entity = spawn_image_node_with_z(commands, img.data.clone(), pose, tab_id, true, z);
+        let entity =
+            spawn_image_node_with_z(commands, img.data.clone(), pose, tab_id, true, z, false, false);
         out.push(super::undo::NodeRecord {
             entity,
             tab_id,

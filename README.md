@@ -11,7 +11,7 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.
 - Butterly smooth performance on canvas with thousands of images
 - Gizmos and interactions that felt just right
 - Free up VRAM whenever possible (More memory for DCC)
-- Local-First design without relying on the Cloud
+- Local-first design without relying on the Cloud
 
 ## Features
 
@@ -69,6 +69,12 @@ For other Linux distros you can find the AppImage in [releases](https://github.c
 ### Windows
 
 For Windows installation see the [releases](https://github.com/zspfx/refcanvas/releases) page for pre-built executable.
+
+### MacOS (Apple Silicon)
+
+> Untested, please open an issue if you found a bug.
+
+Dawin-only artifacts will be compiled through GitHub Actions once a new release is published, you may find them here in [releases](https://github.com/zspfx/refcanvas/releases) page.
 
 ## License
 

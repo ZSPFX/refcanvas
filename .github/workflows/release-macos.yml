@@ -1,0 +1,59 @@
+name: macOS release build
+
+# Builds the arm64 app bundle only when a release is published (a draft does
+# not trigger this), then attaches it to that same release. Commits, tags and
+# draft releases never start a build.
+on:
+  release:
+    types: [published]
+  # Manual retry for a failed build; a tag is required so it cannot run blind.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example v0.1.4)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - name: Resolve the release tag
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          if [ -z "$TAG" ]; then
+            echo "ERROR: no release tag (pass one for manual runs)." >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Dependencies dominate the build; key the cache on the manifest.
+          shared-key: macos-release
+          workspaces: ". -> target"
+
+      - name: Build the app bundle
+        env:
+          REF_RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: ./scripts/build-macos.sh
+
+      - name: Attach the artifact to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: gh release upload "$TAG" dist/refcanvas-*-macos-arm64.zip --clobber

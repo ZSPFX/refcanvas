@@ -1,0 +1,28 @@
+name: macOS check
+
+# Compiles the macOS target on changes without producing any artifacts, so a
+# Darwin-only regression is caught long before the next release.
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  check-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-check
+          workspaces: ". -> target"
+
+      - run: cargo check --locked --target aarch64-apple-darwin

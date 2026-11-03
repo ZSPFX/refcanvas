@@ -2,12 +2,13 @@
 # Re-render the raster icons from assets/icon.svg:
 #   refcanvas-<n>.png   hicolor theme sizes installed by the Linux packages
 #   refcanvas.ico       multi-size icon embedded in the Windows .exe
+#   (the 1024 px PNG is the base image for the macOS .icns)
 # Only needed when the icon changes: the derived files are committed, so release
 # builds need no rasterizer.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PNG_SIZES=(16 22 24 32 48 64 128 256 512)
+PNG_SIZES=(16 22 24 32 48 64 128 256 512 1024)
 ICO_SIZES=(16 24 32 48 64 128 256)
 
 command -v rsvg-convert >/dev/null || {

@@ -650,7 +650,10 @@ fn commit_changed(undo: &mut UndoStack, q: &NodeQ, before: Vec<(Entity, NodeSnap
 fn open_folder(dir: &std::path::Path) {
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("explorer").arg(dir).spawn();
-    #[cfg(not(target_os = "windows"))]
+    // macOS has no `xdg-open`: `open` hands the folder to Finder.
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
 }
 

@@ -182,7 +182,9 @@ pub fn canonical_root(root: &Path) -> String {
         .unwrap_or_else(|_| root.to_path_buf());
     let canonical: PathBuf = canonical.components().collect();
     let text = canonical.to_string_lossy().into_owned();
-    #[cfg(windows)]
+    // Case-insensitive filesystems (NTFS, and APFS by default) must map every
+    // spelling of a path to one local-state entry.
+    #[cfg(any(windows, target_os = "macos"))]
     let text = {
         let mut text = text;
         text = text.to_lowercase();

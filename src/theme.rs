@@ -81,7 +81,13 @@ fn watch_desktop_accent(time: Res<Time>, mut accent: ResMut<Accent>, mut poll: L
         return;
     }
     *poll += time.delta_secs();
-    if *poll < 1.0 {
+    // macOS answers through `defaults`, which spawns a process. The accent
+    // rarely changes there, so poll it far less often than a config file read.
+    #[cfg(target_os = "macos")]
+    let interval = 15.0;
+    #[cfg(not(target_os = "macos"))]
+    let interval = 1.0;
+    if *poll < interval {
         return;
     }
     *poll = 0.0;
@@ -112,10 +118,55 @@ fn read_kde_accent() -> Option<[f32; 3]> {
 }
 
 /// The desktop's accent, per platform: Windows reads the DWM registry value,
-/// everything else the KDE config.
-#[cfg(not(target_os = "windows"))]
+/// macOS the system accent defaults, everything else the KDE config.
+#[cfg(target_os = "macos")]
+fn read_desktop_accent() -> Option<[f32; 3]> {
+    read_macos_accent()
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn read_desktop_accent() -> Option<[f32; 3]> {
     read_kde_accent()
+}
+
+/// macOS stores the accent as `AppleAccentColor`: `-1` for graphite, `0..=7`
+/// for the palette from red to pink. A missing key means the default blue.
+#[cfg(target_os = "macos")]
+fn read_macos_accent() -> Option<[f32; 3]> {
+    let output = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleAccentColor"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return Some(MACOS_ACCENT_BLUE);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    macos_accent_color(text.trim().parse().ok()?)
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_ACCENT_BLUE: [f32; 3] = [0.0, 0.478, 1.0];
+
+/// The system accent palette, as 0-255 RGB.
+#[cfg(target_os = "macos")]
+fn macos_accent_color(index: i32) -> Option<[f32; 3]> {
+    let rgb: [u8; 3] = match index {
+        -1 => [0x8E, 0x8E, 0x93], // graphite
+        0 => [0xFF, 0x51, 0x51],  // red
+        1 => [0xFF, 0x9F, 0x0A],  // orange
+        2 => [0xFF, 0xD6, 0x0F],  // yellow
+        3 => [0x34, 0xC7, 0x59],  // green
+        4 => [0x00, 0xA9, 0xF0],  // blue
+        5 => [0xAC, 0x8C, 0xFF],  // purple
+        6 => [0xFF, 0x2D, 0x55],  // pink
+        7 => [0xA2, 0x84, 0x7D],  // brown
+        _ => return None,
+    };
+    Some([
+        rgb[0] as f32 / 255.0,
+        rgb[1] as f32 / 255.0,
+        rgb[2] as f32 / 255.0,
+    ])
 }
 
 /// The DWM `AccentColor` DWORD (`0xAABBGGRR`; alpha ignored, the app applies

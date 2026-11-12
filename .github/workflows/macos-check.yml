@@ -25,9 +25,9 @@ permissions:
 
 jobs:
   check-arm64:
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -38,7 +38,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-check
-          key: arm64
+          key: arm64-tahoe
           workspaces: ". -> target"
           cache-on-failure: true
 

@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   macos-arm64:
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - name: Resolve the release tag
         id: tag
@@ -33,7 +33,7 @@ jobs:
           fi
           echo "tag=$TAG" >>"$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ steps.tag.outputs.tag }}
 
@@ -47,7 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-release
-          key: arm64
+          key: arm64-tahoe
           # The build dir must match CARGO_TARGET_DIR below, or the restore
           # lands somewhere the script never looks.
           workspaces: ". -> target"

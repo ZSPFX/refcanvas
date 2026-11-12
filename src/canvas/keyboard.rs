@@ -50,8 +50,7 @@ pub fn shortcuts(
 
     // ---- Focus: F frames the selection (or everything), A frames all ----
     let focus_selection = keys.just_pressed(KeyCode::KeyF);
-    let focus_all = keys.just_pressed(KeyCode::KeyA) && !ctrl;
-    if focus_selection || focus_all {
+    if focus_selection {
         let mut poses: Vec<Pose> = Vec::new();
         if focus_selection && !ctx.selection.nodes.is_empty() {
             poses = selection::gather_snapshots(&q, &ctx.selection.nodes)
@@ -74,18 +73,20 @@ pub fn shortcuts(
 
     // ---- Arrow keys: hop the selection to the nearest node in that
     // direction, refocusing with a wider fly-to framing than `F` ----
-    let arrow = if keys.just_pressed(KeyCode::ArrowUp) {
+    let arrow = if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
         Some(Vec2::Y)
-    } else if keys.just_pressed(KeyCode::ArrowDown) {
+    } else if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
         Some(Vec2::NEG_Y)
-    } else if keys.just_pressed(KeyCode::ArrowRight) {
+    } else if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) {
         Some(Vec2::X)
-    } else if keys.just_pressed(KeyCode::ArrowLeft) {
+    } else if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA) {
         Some(Vec2::NEG_X)
     } else {
         None
     };
-    if let Some(dir) = arrow {
+    if let Some(dir) = arrow
+        && !ctrl
+    {
         if ctx.interaction.is_idle() && ctx.selection.nodes.len() == 1 {
             let current = ctx.selection.nodes[0];
             let found = q

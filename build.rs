@@ -15,6 +15,11 @@ fn main() {
         return;
     }
 
+    // Hide the console window on Windows for release builds.
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        println!("cargo:rustc-link-arg=/SUBSYSTEM:WINDOWS");
+    }
+
     let icon = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icons/refcanvas.ico");
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 

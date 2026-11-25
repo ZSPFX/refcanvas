@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 //! refcanvas, a GPU-accelerated infinite canvas for reference images.
 
 mod canvas;

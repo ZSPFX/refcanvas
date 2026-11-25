@@ -4,7 +4,6 @@
 //! <root>/
 //!   journal/       append-only canvas operations (shared, one writer per file)
 //!   checkpoints/   immutable full-state snapshots (shared, one writer per file)
-//!   project.db     legacy single-file database, read once and then left alone
 //!   images/        originals, copied on import (content-hash dedup)
 //!   cache/         generated previews (regenerated on demand)
 //! ```
@@ -43,11 +42,6 @@ impl ProjectStore {
 
     pub fn checkpoint_dir(&self) -> PathBuf {
         self.root.join("checkpoints")
-    }
-
-    /// Legacy single-file database. Only read during migration.
-    pub fn db_path(&self) -> PathBuf {
-        self.root.join("project.db")
     }
 
     pub fn ensure_dirs(&self) -> anyhow::Result<()> {

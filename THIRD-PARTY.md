@@ -13,7 +13,6 @@ under their own licenses, reproduced/referenced here for binary redistribution.
 | [arboard](https://github.com/1Password/arboard) | MIT OR Apache-2.0 |
 | [image](https://github.com/image-rs/image) | MIT OR Apache-2.0 |
 | [blake3](https://github.com/BLAKE3-team/BLAKE3) | CC0-1.0 OR Apache-2.0 |
-| [rusqlite](https://github.com/rusqlite/rusqlite) | MIT |
 | [rfd](https://github.com/PolyMeilex/rfd) | MIT |
 | [directories](https://github.com/dirs-dev/directories-rs) | MIT OR Apache-2.0 |
 | [serde](https://serde.rs) / serde_json | MIT OR Apache-2.0 |

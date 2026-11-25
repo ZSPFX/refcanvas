@@ -407,32 +407,6 @@ pub fn prune_empty_journals(dir: &Path, keep: &Path) {
     }
 }
 
-/// True when the folder already contains any journal (including conflict
-/// copies), i.e. it has been opened by an op-log aware build before.
-pub fn has_journals(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    entries.filter_map(|e| e.ok()).any(|e| {
-        let name = e.file_name();
-        let name = name.to_string_lossy();
-        name.contains(".jsonl") && e.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
-    })
-}
-
-/// True when this folder already has a full-state checkpoint. Used to avoid
-/// re-importing a legacy database after journals have been cleaned up.
-pub fn has_checkpoints(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    entries.filter_map(|e| e.ok()).any(|e| {
-        let name = e.file_name();
-        let name = name.to_string_lossy();
-        name.contains(".json") && e.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Incremental reader
 // ---------------------------------------------------------------------------

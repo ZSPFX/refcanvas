@@ -43,13 +43,9 @@ build() {
     fi
 
     # Build the way the dev scripts do. makepkg's distro flags (see
-    # /etc/makepkg.conf.d/) break this link:
-    #  - CFLAGS carries `-flto=auto`, so the cc crate compiles the bundled
-    #    sqlite into non-fat GIMPLE LTO objects, neither bfd nor lld can
-    #    read those without gcc's LTO plugin ("undefined symbol: sqlite3_*");
-    #  - RUSTFLAGS *replaces* the repo cargo config's rustflags, dropping
-    #    `-fuse-ld=lld` (clang then falls back to GNU ld).
-    # Drop the distro C flags and keep lld, matching dev builds.
+    # /etc/makepkg.conf.d/) replace the repo cargo config's rustflags, dropping
+    # `-fuse-ld=lld` (clang then falls back to GNU ld), so keep lld and drop
+    # the distro C flags.
     unset CFLAGS CXXFLAGS LDFLAGS
     export RUSTFLAGS="${RUSTFLAGS-} -C link-arg=-fuse-ld=lld"
     cargo build --release --locked

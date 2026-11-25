@@ -622,48 +622,6 @@ fn remote_tombstone_removes_a_live_node() {
 }
 
 #[test]
-fn legacy_database_migrates_once_and_ignores_the_old_camera() {
-    let root = std::env::temp_dir().join(format!(
-        "refcanvas-legacy-{}-{}",
-        std::process::id(),
-        NEXT_TEST.fetch_add(1, Ordering::Relaxed)
-    ));
-    let path = root.join("legacy");
-    let store = ProjectStore { root: path.clone() };
-    store.ensure_dirs().unwrap();
-    image::RgbaImage::new(16, 16)
-        .save(store.images_dir().join("test.png"))
-        .unwrap();
-    {
-        let db = rusqlite::Connection::open(store.db_path()).unwrap();
-        db.execute_batch(
-            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE nodes (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 kind TEXT NOT NULL DEFAULT 'image',
-                 x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
-                 rot REAL NOT NULL DEFAULT 0, z REAL NOT NULL DEFAULT 0,
-                 src TEXT, orig_name TEXT, hash TEXT, img_w INTEGER, img_h INTEGER,
-                 flip_x INTEGER NOT NULL DEFAULT 0, flip_y INTEGER NOT NULL DEFAULT 0);
-             INSERT INTO meta VALUES ('view_x','12000'),('view_y','-8000'),('view_log_scale','5');
-             INSERT INTO nodes (x,y,w,h,z,src,hash,img_w,img_h)
-                 VALUES (42,0,16,16,0,'images/test.png','test',16,16);",
-        )
-        .unwrap();
-    }
-
-    let mut clock = Clock::new("migrator".to_string(), 0, 0);
-    let first = open_tab_at(&path, 1, &mut clock).unwrap();
-    assert_eq!(first.merge.nodes.len(), 1);
-    assert_eq!(first.view, (DVec2::ZERO, 0.0));
-
-    // A second open sees the journal and must not import the same row again.
-    let second = open_tab_at(&path, 2, &mut clock).unwrap();
-    assert_eq!(second.merge.nodes.len(), 1);
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
 fn large_tab_mesh_transitions_are_bounded_and_survive_a_quick_return() {
     let mut app = App::new();
     app.add_systems(Update, lod::resume_active_meshes)

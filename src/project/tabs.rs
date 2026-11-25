@@ -19,10 +19,9 @@ use crate::canvas::node::{CanvasNode, InactiveTab, TabOwner};
 use crate::canvas::selection::{Interaction, Selection};
 use crate::canvas::undo::UndoStack;
 
-use super::db;
 use super::import::ImportQueue;
 use super::local;
-use super::oplog::{self, Change, Clock, FileMark, Journal, MergeState, Op};
+use super::oplog::{self, Change, Clock, FileMark, Journal, MergeState};
 use super::persist::{self, PersistenceState, PreviewLoader};
 use super::store::ProjectStore;
 
@@ -113,7 +112,7 @@ pub struct TabRequests {
 }
 
 pub enum TabRequest {
-    /// Open (or create) the project rooted at this path (folder or .db file).
+    /// Open (or create) the project rooted at this folder.
     Open(PathBuf),
     /// Create a project in a folder that is not open yet: activates it even
     /// when it is already a tab, so the picker always answers visibly.
@@ -369,12 +368,7 @@ pub fn process_requests(
     let request = requests.queue.remove(0);
     let mut closing = None;
     let next = match request {
-        TabRequest::Open(path) => {
-            let root = if path.is_dir() {
-                path
-            } else {
-                path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
-            };
+        TabRequest::Open(root) => {
             tabs.unavailable.retain(|pending| pending != &root);
             if let Some(index) = tabs.stored.iter().position(|t| t.store.root == root) {
                 index
@@ -392,12 +386,7 @@ pub fn process_requests(
                 }
             }
         }
-        TabRequest::OpenNew(path) => {
-            let root = if path.is_dir() {
-                path
-            } else {
-                path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
-            };
+        TabRequest::OpenNew(root) => {
             tabs.unavailable.retain(|pending| pending != &root);
             if let Some(index) = tabs.stored.iter().position(|t| t.store.root == root) {
                 index
@@ -415,12 +404,7 @@ pub fn process_requests(
                 }
             }
         }
-        TabRequest::OpenRestored(path) => {
-            let root = if path.is_dir() {
-                path
-            } else {
-                path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
-            };
+        TabRequest::OpenRestored(root) => {
             if tabs.stored.iter().any(|tab| tab.store.root == root) {
                 save_session(&tabs);
                 return;
@@ -543,10 +527,7 @@ pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<Op
     store.ensure_dirs()?;
 
     let cached = local::load_state(root).unwrap_or_default();
-    let first_open = cached.root.is_empty()
-        && !oplog::has_journals(&store.journal_dir())
-        && !oplog::has_checkpoints(&store.checkpoint_dir());
-    let mut journal = Journal::create(&store.journal_dir(), clock.device_id())?;
+    let journal = Journal::create(&store.journal_dir(), clock.device_id())?;
     oplog::prune_empty_journals(&store.journal_dir(), journal.path());
 
     let mut merge = cached.merge;
@@ -554,24 +535,6 @@ pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<Op
 
     if let Err(err) = oplog::read_project(&store.root, &mut merge, &mut files) {
         warn!("initial project read failed: {err:#}");
-    }
-
-    // Only open the legacy database when this project has never been used with
-    // journals, or when a partial first journal left the merged state empty.
-    // Re-running migration is safe: legacy node ids are content-derived, so
-    // duplicates collapse in the merge.
-    if (first_open || merge.is_empty()) && store.db_path().is_file() {
-        match db::load(&store.db_path()) {
-            Ok(rows) if !rows.is_empty() => {
-                let count = migrate_legacy(&mut journal, &rows, clock)?;
-                info!("migrated {count} legacy node(s)");
-                if let Err(err) = oplog::read_project(&store.root, &mut merge, &mut files) {
-                    warn!("project read after migration failed: {err:#}");
-                }
-            }
-            Ok(_) => {}
-            Err(err) => debug!("legacy database not migrated: {err:#}"),
-        }
     }
 
     if let Some(rev) = merge.max_seen() {
@@ -601,27 +564,6 @@ pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<Op
     };
     local::save_state(&tab.store.root, &tab.merge, &tab.files);
     Ok(tab)
-}
-
-fn migrate_legacy(
-    journal: &mut Journal,
-    rows: &[(i64, super::oplog::SavedNode)],
-    clock: &mut Clock,
-) -> anyhow::Result<usize> {
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    let mut ops = Vec::with_capacity(rows.len());
-    for (row, saved) in rows {
-        ops.push(Op {
-            id: db::legacy_id(*row, saved),
-            rev: clock.tick(),
-            deleted: false,
-            node: Some(saved.clone()),
-        });
-    }
-    journal.append(ops)?;
-    Ok(rows.len())
 }
 
 fn ensure_loaded(

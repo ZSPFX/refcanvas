@@ -1,6 +1,5 @@
 //! Project data: on-disk store, operation journals, tabs, import pipeline.
 
-pub mod db;
 pub mod import;
 pub mod local;
 pub mod oplog;

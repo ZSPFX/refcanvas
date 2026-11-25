@@ -64,7 +64,6 @@ bevy_egui = { version = "0.43", default-features = false, features = [
     "render",
     "bevy_ui",
 ] }
-rusqlite = { version = "0.40", features = ["bundled"] }
 # System clipboard (Ctrl+C / Ctrl+V). `wayland-data-control` speaks the
 # native Wayland protocol (wl-clipboard equivalent) and falls back to X11
 # when the compositor doesn't offer it; on X11 arboard serves the selection

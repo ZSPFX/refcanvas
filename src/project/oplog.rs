@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use bevy::log::{debug, warn};
+use bevy::log::{info, warn};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -812,7 +812,7 @@ pub fn write_checkpoint_and_trim(
     if checkpoint.is_some() {
         let trimmed = trim_journal_tail(journal_dir, device, state, keep, JOURNAL_RETENTION);
         if trimmed > 0 {
-            debug!("trimmed {trimmed} old journal(s)");
+            info!("trimmed {trimmed} old journal(s)");
         }
     }
     Ok(checkpoint)

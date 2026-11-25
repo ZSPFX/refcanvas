@@ -8,6 +8,7 @@ pub mod store;
 pub mod sync;
 pub mod tabs;
 
+use bevy::app::OnAppExitSystems;
 use bevy::prelude::*;
 
 use crate::canvas::{CanvasLateSet, CanvasSet};
@@ -49,7 +50,7 @@ impl Plugin for ProjectPlugin {
                     .chain()
                     .after(CanvasLateSet),
             )
-            .add_systems(Last, tabs::on_exit);
+            .add_systems(Last, tabs::on_exit.in_set(OnAppExitSystems));
     }
 }
 

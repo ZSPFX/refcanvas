@@ -4693,6 +4693,7 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "blake3",
+ "ctrlc",
  "directories",
  "image",
  "rfd",

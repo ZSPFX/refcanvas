@@ -622,6 +622,29 @@ fn remote_tombstone_removes_a_live_node() {
 }
 
 #[test]
+fn exit_writes_checkpoint_after_app_exit_event() {
+    fn send_exit(mut exit: MessageWriter<AppExit>) {
+        exit.write(AppExit::Success);
+    }
+
+    let mut f = Fixture::new();
+    f.app
+        .configure_sets(
+            Last,
+            bevy::app::OnAppExitSystems.after(bevy::window::ExitSystems),
+        )
+        .add_systems(Last, send_exit.in_set(bevy::window::ExitSystems))
+        .add_systems(Last, on_exit.in_set(bevy::app::OnAppExitSystems));
+    f.app.update();
+
+    for id in [0, 1] {
+        let checkpoints = f.root.join(id.to_string()).join("checkpoints");
+        assert!(std::fs::read_dir(checkpoints).unwrap().next().is_some());
+    }
+    let _ = std::fs::remove_dir_all(&f.root);
+}
+
+#[test]
 fn large_tab_mesh_transitions_are_bounded_and_survive_a_quick_return() {
     let mut app = App::new();
     app.add_systems(Update, lod::resume_active_meshes)

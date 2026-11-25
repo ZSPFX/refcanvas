@@ -1,82 +1,84 @@
 # <sub><img src="https://cdn.zspfx.com/refcanvas/icon.svg" width="32" height="32" alt=""></sub> refcanvas
 
-A GPU-accelerated infinite canvas for digital artists, written in Rust + Bevy 0.20 with Vulkan rendering.
+A GPU-accelerated infinite canvas for digital artists, written in Rust using Bevy 0.20 (Vulkan backend).
 
 ![Picture](https://cdn.zspfx.com/refcanvas/app_0.1.2-3.webp)
 
-> Heads-up, LLM were used to built this; it is marely as a tool to translate my technical decisions into a code, I took full control over the design and software artitecture to ensure best possible quality and smooth experience using my software engineering knowledge.
+> Heads-up: LLM were used to build this, it's marely a tool to translate my technical decisions into code, I took full control over the design and architecture using my software engineering knowledge.
+
+> `README.md` and commits are fully written by me to ensure quality and human readability.
 
 ## Design Goals
 
-- Butterly smooth performance on canvas with thousands of images
-- Gizmos and interactions that felt just right
-- Free up VRAM whenever possible (More memory for DCC)
-- Local-first design without relying on the Cloud
+- Support multiple artists accessing the same project on shared drive. (Compatiable with Syncthing and SMB!)
+- Stable and smooth canvas performance with thousands of images.
+- Local-first design without relying on the Cloud.
+- Free up GPU memory (VRAM) whenever possible.
+- Hotkeys/Gizmos that felt just right.
+- Introduce industry-standard hotkeys.
 
 ## Features
 
-- Drag & drop images
-- Portable project folder / Open multiple projects as tabs
-- Copy image to clipboard and paste from clipboard
-- Crisp image pixels when deep zoom
-- Gizmos control for single/multi-selection transformation
-- Move/Scale/Crop smart snapping on visible images
-- Arrow key focused image navigations
-- Focus on selected images [F]
-- Frame group of images [CTRL+G]
-- Industry standard hotkeys
-- Autosave, Undo and Redo [Z, CTRL+Y]
-- Hold thousands of images in one canvas (5,000+ OK!)
-- Touchscreen support (Surface devices)
-- Support shared folder, multiple artists viewing/editing at the same time
-- Always-on-top pin for keeping references above other apps
+- App
+  - Portable project folder.
+  - Open multiple projects as tabs.
+  - Support Syncthing/SMB shared folder location and multiple user viewing/editing at the same time.
+  - Always-on-top pin for keeping references above other apps.
+  - Support thousands of images in one canvas. (5,000+ OK!)
+  - Touchscreen support. (Surface devices)
+
+- Canvas
+  - Drag and drop images.
+  - Copy/paste images from/to the clipboard.
+  - Crisp pixels when zoomed in deeply.
+  - Gizmos control for single and multi selection.
+  - Smart snapping that only snaps on visible images.
+  - Arrow key navigations on focused image.
+  - Focus on selected images. [F]
+  - Frame group of images. [CTRL+G]
+  - Automatic saving, Undo and Redo. [Z, CTRL+Y]
 
 ## Technical Features
 
-> Benchmarking can be done by clicking on bottom right FPS label to uncap the 120FPS limit.
+> Benchmarking can be done by clicking the bottom right FPS label to uncap the 120FPS limit.
 
-- First-class Linux support, also runs on Windows
-- Vulkan backend renderer performance, benchmarked result with (2K~4K images scattered in clusters)
-  - 1000~ FPS, 100 images
-  - 900~ FPS, 200 images
-  - 800~ FPS, 500 images
-  - 200~ FPS, 5,000 images
-- Automatic VRAM eviction
-- Arrow key image navigations with ray casting, distance, and viewport boundary
-- 0% CPU/GPU utilization while idle/unfocused
-- Previews (512px) LOD generation
+- First-class Linux support, also runs on Windows and MacOS.
+- Shared folder (per-device append-only journal and automatic conflict resolution).
+- Vulkan backend renderer performance, benchmarked result with 2K~4K images scattered in clusters.
+  - 1000~ FPS, 100 images.
+  - 900~ FPS, 200 images.
+  - 800~ FPS, 500 images.
+  - 200~ FPS, 5000 images.
+- LOD previews generation.
+- Automatic VRAM eviction when LOD is active.
+- 0% CPU/GPU utilization while idle/unfocused.
+- Arrow key image navigations with ray casting, distance, and viewport boundary.
 
-## Not Yet Supported / Planned
+## Not Yet Supported / Planned features
 
-- OpenColorIO
-- Texts
-- Animated GIF
-- Videos
-- Compare A/B test slider
-- Arrangement compaction
-- Change frame color
+- OpenColorIO.
+- Texts.
+- Animated GIF.
+- Videos.
+- Compare A/B test slider.
+- Arrangement compaction.
+- Change frame color.
 
 ## Download & Installation
 
-> When there's a new version the app will let you know.
-
 ### Linux
 
-For Arch Linux you can download the tar file from [releases](https://github.com/zspfx/refcanvas/releases) then install with `sudo pacman -U ./refcanvas...x86_64.pkg.tar.zst`
+Arch Linux users may download the tar file from [releases](https://github.com/zspfx/refcanvas/releases) then install with `sudo pacman -U ./refcanvas...x86_64.pkg.tar.zst`.
 
-For other Linux distros you can find the AppImage in [releases](https://github.com/zspfx/refcanvas/releases) page.
+While other distros users may find the AppImage in [releases](https://github.com/zspfx/refcanvas/releases) page.
 
 ### Windows
 
-For Windows installation see the [releases](https://github.com/zspfx/refcanvas/releases) page for pre-built executable.
+Windows users may find the installation from [releases](https://github.com/zspfx/refcanvas/releases).
 
 ### MacOS (Apple Silicon)
 
-> Untested, please open an issue if you found a bug.
-
-Dawin-only artifacts will be compiled through GitHub Actions once a new release is published, you may find them here in [releases](https://github.com/zspfx/refcanvas/releases) page.
-
-Unzip the file first then move `RefCanvas.app` into `/Applications`. After that, remove the quarantine flag using `xattr -cr /Applications/RefCanvas.app`.
+Dawin-only artifacts will be compiled through GitHub Actions once a new release is published, you may find them here in [releases](https://github.com/zspfx/refcanvas/releases). Extract the zip then move `RefCanvas.app` into `/Applications`, then remove the quarantine flag using `xattr -cr /Applications/RefCanvas.app`.
 
 ## License
 

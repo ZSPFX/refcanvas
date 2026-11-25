@@ -89,7 +89,7 @@ pub struct ImageData {
     /// Visible portion of the image, in natural texel coordinates
     /// (texture space: origin top-left). Resizing handles keep the picture at
     /// a uniform scale ("fill/cover", CSS `object-fit: cover`): the container resizes and
-    /// the crop follows, so pixels are never stretched.
+    /// the crop follows, so pixels are never stretched. a precise crop survives resizes.
     pub crop: Rect,
     /// Display scale: world units per source texel (uniform).
     pub px_scale: f32,

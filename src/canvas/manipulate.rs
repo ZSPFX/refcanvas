@@ -404,6 +404,24 @@ pub fn apply_scale(
     apply_scale_factors(pivot, frame.rot, sx, sy, &drag.snapshots, q);
 }
 
+/// resize within the current crop so hidden pixels stay hidden
+fn image_cover_resize(start_crop: Rect, start_px_scale: f32, new_size: Vec2) -> (Rect, f32) {
+    let start_size = (start_crop.size() * start_px_scale).max(Vec2::splat(1e-4));
+    let k = (new_size.x / start_size.x)
+        .max(new_size.y / start_size.y)
+        .max(1e-4);
+    let px = (start_px_scale * k).max(1e-4);
+    let crop_size = Vec2::new(
+        (new_size.x / px).min(start_crop.width()),
+        (new_size.y / px).min(start_crop.height()),
+    );
+    let half = crop_size * 0.5;
+    let center = start_crop
+        .center()
+        .clamp(start_crop.min + half, start_crop.max - half);
+    (Rect::from_center_size(center, crop_size), px)
+}
+
 fn apply_scale_factors(
     anchor: Vec2,
     frame_rot: f32,
@@ -422,23 +440,10 @@ fn apply_scale_factors(
         let new_center = anchor + rot2(frame_rot) * scaled;
         let new_size = Vec2::new((p0.size.x * sx).max(1.0), (p0.size.y * sy).max(1.0));
 
-        // Images use CSS `object-fit: cover` semantics:
-        // the handle resizes the container freely, and the picture rescales
-        // uniformly to cover it. Growing the container grows the whole image
-        // (or crops it, if the aspect ratio demands it), never stretched.
+        // images use cover: resize from the visible crop so it doesn't reset
         let size = if let Some(img) = node.image_mut() {
-            let natural = img.data.natural.as_vec2().max(Vec2::ONE);
-            let px = (new_size.x / natural.x)
-                .max(new_size.y / natural.y)
-                .max(1e-4);
-            let crop_w = (new_size.x / px).min(natural.x);
-            let crop_h = (new_size.y / px).min(natural.y);
-            // Keep the currently visible region centered where it is.
-            let prev = snap.crop.center();
-            let cx = prev.x.clamp(crop_w * 0.5, natural.x - crop_w * 0.5);
-            let cy = prev.y.clamp(crop_h * 0.5, natural.y - crop_h * 0.5);
-            img.data.crop =
-                Rect::from_center_size(Vec2::new(cx, cy), Vec2::new(crop_w, crop_h));
+            let (crop, px) = image_cover_resize(snap.crop, snap.px_scale, new_size);
+            img.data.crop = crop;
             img.data.px_scale = px;
             img.data.crop.size() * px
         } else {
@@ -719,4 +724,54 @@ pub fn focus_poses_with_margin(
         DVec2::new(fit.center().x as f64, fit.center().y as f64),
         log_new,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn crop(min: Vec2, max: Vec2) -> Rect {
+        Rect::from_corners(min, max)
+    }
+
+    #[test]
+    fn resize_keeps_an_existing_crop() {
+        let start = crop(Vec2::new(100.0, 120.0), Vec2::new(300.0, 280.0)); // 200×160
+        let (new_crop, px) = image_cover_resize(start, 1.0, Vec2::new(400.0, 320.0));
+        assert_eq!(new_crop, start);
+        assert_eq!(px, 2.0);
+    }
+
+    #[test]
+    fn shrink_keeps_an_existing_crop() {
+        let start = crop(Vec2::new(100.0, 120.0), Vec2::new(300.0, 280.0));
+        let (new_crop, px) = image_cover_resize(start, 2.0, Vec2::new(100.0, 80.0));
+        assert_eq!(new_crop, start);
+        assert_eq!(px, 0.5);
+    }
+
+    #[test]
+    fn non_uniform_resize_trims_within_the_crop() {
+        let start = crop(Vec2::new(100.0, 100.0), Vec2::new(300.0, 300.0)); // 200×200
+        let (new_crop, px) = image_cover_resize(start, 1.0, Vec2::new(400.0, 100.0));
+        assert_eq!(px, 2.0);
+        assert_eq!(
+            new_crop,
+            crop(Vec2::new(100.0, 175.0), Vec2::new(300.0, 225.0))
+        );
+        // stays inside the original crop
+        assert!(new_crop.min.cmpge(start.min).all());
+        assert!(new_crop.max.cmple(start.max).all());
+    }
+
+    #[test]
+    fn uncropped_resize_matches_cover_fit() {
+        let full = crop(Vec2::ZERO, Vec2::splat(1000.0));
+        let (new_crop, px) = image_cover_resize(full, 0.5, Vec2::new(2000.0, 1000.0));
+        assert_eq!(px, 2.0);
+        assert_eq!(
+            new_crop,
+            crop(Vec2::new(0.0, 250.0), Vec2::new(1000.0, 750.0))
+        );
+    }
 }

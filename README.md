@@ -10,11 +10,10 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust using Bev
 
 ## Design Goals
 
-- Support multiple artists accessing the same project on shared drive. (Compatiable with Syncthing and SMB!)
+- Support multiple artists accessing the same project on shared drive. (compatible with Syncthing and SMB!)
 - Stable and smooth canvas performance with thousands of images.
-- Local-first design without relying on the Cloud.
-- Free up GPU memory (VRAM) whenever possible.
-- Hotkeys/Gizmos that felt just right.
+- Free up GPU VRAM whenever possible.
+- Hotkeys and gizmos that felt just right.
 - Introduce industry-standard hotkeys.
 
 ## Features
@@ -69,16 +68,15 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust using Bev
 ### Linux
 
 Arch Linux users may download the tar file from [releases](https://github.com/zspfx/refcanvas/releases) then install with `sudo pacman -U ./refcanvas...x86_64.pkg.tar.zst`.
-
-While other distros users may find the AppImage in [releases](https://github.com/zspfx/refcanvas/releases) page.
+Other distros may find the AppImage from the same page as well.
 
 ### Windows
 
-Windows users may find the installation from [releases](https://github.com/zspfx/refcanvas/releases).
+Windows users may find the precompiled executable from [releases](https://github.com/zspfx/refcanvas/releases).
 
 ### MacOS (Apple Silicon)
 
-Dawin-only artifacts will be compiled through GitHub Actions once a new release is published, you may find them here in [releases](https://github.com/zspfx/refcanvas/releases). Extract the zip then move `RefCanvas.app` into `/Applications`, then remove the quarantine flag using `xattr -cr /Applications/RefCanvas.app`.
+Dawin-only artifacts will be compiled through GitHub Actions shortly after the new release is published, you may find them at [releases](https://github.com/zspfx/refcanvas/releases). Extract the zip first then move `RefCanvas.app` into `/Applications`, then remove the quarantine flag using `xattr -cr /Applications/RefCanvas.app`.
 
 ## License
 

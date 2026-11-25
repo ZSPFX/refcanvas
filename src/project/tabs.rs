@@ -503,6 +503,7 @@ pub fn process_requests(
         }
         loader.forget(id);
         let tab = tabs.stored.remove(index);
+        tab.journal.remove_if_empty();
         if tab.state_dirty || tab.checkpoint_dirty {
             local::save_state(&tab.store.root, &tab.merge, &tab.files);
         }
@@ -527,6 +528,7 @@ pub fn on_exit(
     let device = tabs.clock.device_id().to_string();
     for tab in &tabs.stored {
         persist::save_on_exit(tab, &device);
+        tab.journal.remove_if_empty();
     }
 }
 
@@ -545,6 +547,7 @@ pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<Op
         && !oplog::has_journals(&store.journal_dir())
         && !oplog::has_checkpoints(&store.checkpoint_dir());
     let mut journal = Journal::create(&store.journal_dir(), clock.device_id())?;
+    oplog::prune_empty_journals(&store.journal_dir(), journal.path());
 
     let mut merge = cached.merge;
     let mut files = cached.files;

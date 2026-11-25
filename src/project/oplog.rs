@@ -341,9 +341,18 @@ impl Journal {
         })
     }
 
-    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// drop the session file if it never received an op
+    pub fn remove_if_empty(&self) {
+        if std::fs::metadata(&self.path)
+            .map(|meta| meta.len() == 0)
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 
     pub fn append(&mut self, ops: Vec<Op>) -> Result<bool> {
@@ -370,6 +379,31 @@ impl Journal {
         file.sync_data()?;
         drop(file);
         Ok(true)
+    }
+}
+
+/// remove zero-length session journals; they contain no ops
+pub fn prune_empty_journals(dir: &Path, keep: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        if path == keep {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".jsonl") || name.contains(".sync-conflict-") {
+            continue;
+        }
+        let empty = entry
+            .metadata()
+            .map(|meta| meta.is_file() && meta.len() == 0)
+            .unwrap_or(false);
+        if empty {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -904,6 +938,59 @@ mod tests {
             a_state.nodes[&contested].node,
             b_state.nodes[&contested].node
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_journals_are_pruned() {
+        let root = std::env::temp_dir().join(format!(
+            "refcanvas-empty-journal-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dir = root.join("journal");
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("dev-current.jsonl");
+        let empty = dir.join("dev-empty.jsonl");
+        let full = dir.join("dev-full.jsonl");
+        let conflict = dir.join("dev-empty.jsonl.sync-conflict-20260101-000000-ABCDEFG");
+        for path in [&current, &empty, &conflict] {
+            std::fs::write(path, []).unwrap();
+        }
+        std::fs::write(&full, b"ops").unwrap();
+
+        prune_empty_journals(&dir, &current);
+        assert!(current.exists());
+        assert!(!empty.exists());
+        assert!(full.exists());
+        assert!(conflict.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_session_journal_is_removed_after_use() {
+        let root = std::env::temp_dir().join(format!(
+            "refcanvas-remove-empty-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dir = root.join("journal");
+        let empty = Journal::create(&dir, "dev").unwrap();
+        let empty_path = empty.path().to_path_buf();
+        empty.remove_if_empty();
+        assert!(!empty_path.exists());
+
+        let mut used = Journal::create(&dir, "dev").unwrap();
+        let used_path = used.path().to_path_buf();
+        used.append(vec![Op {
+            id: Uuid::now_v7(),
+            rev: clock("dev").tick(),
+            deleted: false,
+            node: Some(node(1.0)),
+        }])
+        .unwrap();
+        used.remove_if_empty();
+        assert!(used_path.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

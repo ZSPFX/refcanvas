@@ -134,10 +134,14 @@ pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tab
             // costs startup replay time.
             tab.checkpoint_dirty = false;
             let dir = tab.store.checkpoint_dir();
+            let journal_dir = tab.store.journal_dir();
+            let keep = tab.journal.path().to_path_buf();
             let state = tab.merge.clone();
             let device = device.clone();
             std::thread::spawn(move || {
-                if let Err(err) = oplog::write_checkpoint(&dir, &device, &state) {
+                if let Err(err) =
+                    oplog::write_checkpoint_and_trim(&dir, &journal_dir, &device, &state, &keep)
+                {
                     warn!("checkpoint write failed: {err:#}");
                 }
             });

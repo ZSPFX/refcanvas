@@ -723,7 +723,13 @@ pub fn pump_preview_loads(
 pub fn save_on_exit(tab: &super::tabs::OpenTab, device: &str) {
     local::save_state(&tab.store.root, &tab.merge, &tab.files);
     local::save_view(&tab.store.root, tab.view.0, tab.view.1);
-    if let Err(err) = oplog::write_checkpoint(&tab.store.checkpoint_dir(), device, &tab.merge) {
+    if let Err(err) = oplog::write_checkpoint_and_trim(
+        &tab.store.checkpoint_dir(),
+        &tab.store.journal_dir(),
+        device,
+        &tab.merge,
+        tab.journal.path(),
+    ) {
         warn!("checkpoint write failed: {err:#}");
     }
 }

@@ -16,10 +16,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use bevy::log::warn;
+use bevy::log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -309,6 +309,13 @@ impl MergeState {
 // Journal writer
 // ---------------------------------------------------------------------------
 
+fn safe_device(device: &str) -> String {
+    device
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
 pub struct Journal {
     path: PathBuf,
     device: String,
@@ -322,10 +329,7 @@ impl Journal {
     /// batches.
     pub fn create(dir: &Path, device: &str) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let safe: String = device
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
+        let safe = safe_device(device);
         let session = Uuid::now_v7().simple().to_string();
         let path = dir.join(format!("{safe}-{session}.jsonl"));
         let file = OpenOptions::new()
@@ -405,6 +409,119 @@ pub fn prune_empty_journals(dir: &Path, keep: &Path) {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// keep one week of own session history after it has been checkpointed
+pub const JOURNAL_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+fn is_session_journal(name: &str, prefix: &str) -> bool {
+    let Some(stem) = name
+        .strip_prefix(prefix)
+        .and_then(|s| s.strip_suffix(".jsonl"))
+    else {
+        return false;
+    };
+    stem.len() == 32 && stem.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn journal_covered(path: &Path, state: &MergeState) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let mut reader = BufReader::new(file);
+    loop {
+        let mut line = Vec::new();
+        let read = match reader.read_until(b'\n', &mut line) {
+            Ok(read) => read,
+            Err(_) => return false,
+        };
+        if read == 0 {
+            return true;
+        }
+        if line.last() != Some(&b'\n') {
+            return false;
+        }
+        line.pop();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(batch) = serde_json::from_slice::<Batch>(&line) else {
+            return false;
+        };
+        for op in batch.ops {
+            match state.nodes.get(&op.id) {
+                Some(node) if node.rev >= op.rev => {}
+                _ => return false,
+            }
+        }
+    }
+}
+
+/// delete own journal files older than `retention` once a checkpoint covers them
+pub fn trim_journal_tail(
+    dir: &Path,
+    device: &str,
+    state: &MergeState,
+    keep: &Path,
+    retention: Duration,
+) -> usize {
+    let prefix = format!("{}-", safe_device(device));
+    let now = SystemTime::now();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut candidates: Vec<(u128, PathBuf)> = Vec::new();
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        if path == keep {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !is_session_journal(&name, &prefix) || name.contains(".sync-conflict-") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() == 0 {
+            continue;
+        }
+        let Some(mtime) = meta.modified().ok() else {
+            continue;
+        };
+        let old = now
+            .duration_since(mtime)
+            .map(|age| age >= retention)
+            .unwrap_or(false);
+        if old {
+            candidates.push((mtime_ns(&meta), path));
+        }
+    }
+    candidates.sort();
+    let mut trimmed = 0;
+    for (mtime, path) in candidates {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let len = meta.len();
+        if len == 0 || mtime_ns(&meta) != mtime {
+            continue;
+        }
+        if !journal_covered(&path, state) {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.len() != len || mtime_ns(&meta) != mtime {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            trimmed += 1;
+        }
+    }
+    trimmed
 }
 
 // ---------------------------------------------------------------------------
@@ -656,10 +773,7 @@ pub fn write_checkpoint(dir: &Path, device: &str, state: &MergeState) -> Result<
         return Ok(None);
     }
     std::fs::create_dir_all(dir)?;
-    let safe: String = device
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
+    let safe = safe_device(device);
     let checkpoint = Checkpoint {
         v: wire_version(),
         device: safe.clone(),
@@ -671,10 +785,37 @@ pub fn write_checkpoint(dir: &Path, device: &str, state: &MergeState) -> Result<
     let name = format!("{safe}-{:013}-{:04x}.json", now_ms(), nonce() & 0xFFFF);
     let path = dir.join(&name);
     let tmp = dir.join(format!(".{name}.tmp"));
-    std::fs::write(&tmp, &bytes)?;
+    let mut file = File::create(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_data()?;
+    drop(file);
     std::fs::rename(&tmp, &path)?;
+    let bytes = std::fs::read(&path)?;
+    if let Err(err) = serde_json::from_slice::<Checkpoint>(&bytes) {
+        let _ = std::fs::remove_file(&path);
+        return Err(anyhow::Error::from(err))
+            .with_context(|| format!("verifying checkpoint {path:?}"));
+    }
     prune_own_checkpoints(dir, &safe, 3);
     Ok(Some(path))
+}
+
+/// write a checkpoint, then trim the journal tail it covers
+pub fn write_checkpoint_and_trim(
+    checkpoint_dir: &Path,
+    journal_dir: &Path,
+    device: &str,
+    state: &MergeState,
+    keep: &Path,
+) -> Result<Option<PathBuf>> {
+    let checkpoint = write_checkpoint(checkpoint_dir, device, state)?;
+    if checkpoint.is_some() {
+        let trimmed = trim_journal_tail(journal_dir, device, state, keep, JOURNAL_RETENTION);
+        if trimmed > 0 {
+            debug!("trimmed {trimmed} old journal(s)");
+        }
+    }
+    Ok(checkpoint)
 }
 
 fn prune_own_checkpoints(dir: &Path, device: &str, keep: usize) {
@@ -912,6 +1053,118 @@ mod tests {
             a_state.nodes[&contested].node,
             b_state.nodes[&contested].node
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn journal_tail_trims_only_covered_own_files() {
+        let root = std::env::temp_dir().join(format!(
+            "refcanvas-trim-journal-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dir = root.join("journal");
+        let mut state = MergeState::default();
+        let mut c = clock("dev");
+
+        let mut covered = Journal::create(&dir, "dev").unwrap();
+        let covered_id = Uuid::now_v7();
+        let covered_rev = c.tick();
+        covered
+            .append(vec![Op {
+                id: covered_id,
+                rev: covered_rev.clone(),
+                deleted: false,
+                node: Some(node(1.0)),
+            }])
+            .unwrap();
+        state.merge(covered_id, covered_rev, false, Some(node(1.0)));
+        let covered_path = covered.path().to_path_buf();
+        drop(covered);
+
+        let mut uncovered = Journal::create(&dir, "dev").unwrap();
+        uncovered
+            .append(vec![Op {
+                id: Uuid::now_v7(),
+                rev: c.tick(),
+                deleted: false,
+                node: Some(node(2.0)),
+            }])
+            .unwrap();
+        let uncovered_path = uncovered.path().to_path_buf();
+        drop(uncovered);
+
+        let mut current = Journal::create(&dir, "dev").unwrap();
+        let current_id = Uuid::now_v7();
+        let current_rev = c.tick();
+        current
+            .append(vec![Op {
+                id: current_id,
+                rev: current_rev.clone(),
+                deleted: false,
+                node: Some(node(3.0)),
+            }])
+            .unwrap();
+        state.merge(current_id, current_rev, false, Some(node(3.0)));
+        let current_path = current.path().to_path_buf();
+        drop(current);
+
+        let mut other = Journal::create(&dir, "other").unwrap();
+        other
+            .append(vec![Op {
+                id: Uuid::now_v7(),
+                rev: clock("other").tick(),
+                deleted: false,
+                node: Some(node(4.0)),
+            }])
+            .unwrap();
+        let other_path = other.path().to_path_buf();
+        drop(other);
+
+        let mut partial = Journal::create(&dir, "dev").unwrap();
+        let partial_id = Uuid::now_v7();
+        let partial_rev = c.tick();
+        partial
+            .append(vec![Op {
+                id: partial_id,
+                rev: partial_rev.clone(),
+                deleted: false,
+                node: Some(node(5.0)),
+            }])
+            .unwrap();
+        state.merge(partial_id, partial_rev, false, Some(node(5.0)));
+        let partial_path = partial.path().to_path_buf();
+        {
+            use std::io::Write;
+            let mut file = OpenOptions::new().append(true).open(&partial_path).unwrap();
+            file.write_all(br#"{"v":1,"device":"dev""#).unwrap();
+        }
+        drop(partial);
+
+        let conflict = dir.join(format!(
+            "{}.sync-conflict-20260101-000000-ABCDEFG",
+            covered_path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::copy(&covered_path, &conflict).unwrap();
+
+        let fresh = trim_journal_tail(
+            &dir,
+            "dev",
+            &state,
+            &current_path,
+            Duration::from_secs(60 * 60),
+        );
+        assert_eq!(fresh, 0);
+        assert!(covered_path.exists());
+
+        let trimmed = trim_journal_tail(&dir, "dev", &state, &current_path, Duration::ZERO);
+        assert_eq!(trimmed, 1);
+        assert!(!covered_path.exists());
+        assert!(uncovered_path.exists());
+        assert!(current_path.exists());
+        assert!(other_path.exists());
+        assert!(partial_path.exists());
+        assert!(conflict.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

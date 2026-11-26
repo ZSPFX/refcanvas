@@ -48,7 +48,7 @@ pub struct OpenTab {
     pub id: u64,
     pub name: String,
     pub store: ProjectStore,
-    pub journal: Journal,
+    pub journal: Option<Journal>,
     pub merge: MergeState,
     pub files: HashMap<String, FileMark>,
     /// remote changes waiting for the pointer to go idle.
@@ -56,6 +56,7 @@ pub struct OpenTab {
     pub state: PersistenceState,
     pub state_dirty: bool,
     pub checkpoint_dirty: bool,
+    pub opened: bool,
     pub loaded: bool,
     undo: UndoStack,
     imports: ImportQueue,
@@ -239,13 +240,7 @@ fn restore_session(
     let wanted_root = session.tabs.get(session.active).map(PathBuf::from);
     for root in &roots {
         let id = tabs.new_id();
-        match open_tab_at(root, id, &mut tabs.clock) {
-            Ok(tab) => tabs.stored.push(tab),
-            Err(err) => {
-                warn!("failed to open {}: {err:#}", root.display());
-                tabs.unavailable.push(root.clone());
-            }
-        }
+        tabs.stored.push(placeholder_tab(root, id));
     }
     if tabs.stored.is_empty() {
         error!("no project could be opened");
@@ -258,7 +253,12 @@ fn restore_session(
         .unwrap_or(0);
     let mut activated = false;
     for index in std::iter::once(preferred).chain((0..tabs.len()).filter(|i| *i != preferred)) {
-        let tab = &mut tabs.stored[index];
+        let Tabs { stored, clock, .. } = &mut *tabs;
+        let tab = &mut stored[index];
+        if let Err(err) = open_tab(tab, clock) {
+            warn!("failed to open {}: {err:#}", tab.store.root.display());
+            continue;
+        }
         match ensure_loaded(tab, commands, images, zc, loader) {
             Ok(()) => {
                 tabs.active = index;
@@ -399,15 +399,7 @@ pub fn process_requests(
                 return;
             }
             let id = tabs.new_id();
-            match open_tab_at(&root, id, &mut tabs.clock) {
-                Ok(tab) => tabs.stored.push(tab),
-                Err(err) => {
-                    warn!("failed to restore {}: {err:#}", root.display());
-                    if !tabs.unavailable.iter().any(|pending| pending == &root) {
-                        tabs.unavailable.push(root);
-                    }
-                }
-            }
+            tabs.stored.push(placeholder_tab(&root, id));
             save_session(&tabs);
             return;
         }
@@ -447,6 +439,13 @@ pub fn process_requests(
     };
 
     if next != tabs.active || !tabs.stored[next].loaded {
+        if !tabs.stored[next].opened {
+            let Tabs { stored, clock, .. } = &mut *tabs;
+            if let Err(err) = open_tab(&mut stored[next], clock) {
+                warn!("failed to open {}: {err:#}", stored[next].store.root.display());
+                return;
+            }
+        }
         let tab = &mut tabs.stored[next];
         if let Err(err) = ensure_loaded(tab, &mut commands, &mut images, &mut zc, &mut loader) {
             warn!("failed to load {}: {err:#}", tab.store.root.display());
@@ -476,8 +475,10 @@ pub fn process_requests(
         }
         loader.forget(id);
         let tab = tabs.stored.remove(index);
-        tab.journal.remove_if_empty();
-        if tab.state_dirty || tab.checkpoint_dirty {
+        if let Some(journal) = &tab.journal {
+            journal.remove_if_empty();
+        }
+        if tab.opened && (tab.state_dirty || tab.checkpoint_dirty) {
             local::save_state(&tab.store.root, &tab.merge, &tab.files);
         }
         if index < tabs.active {
@@ -500,20 +501,54 @@ pub fn on_exit(
     save_session(&tabs);
     let device = tabs.clock.device_id().to_string();
     for tab in &tabs.stored {
+        if !tab.opened {
+            continue;
+        }
         persist::save_on_exit(tab, &device);
-        tab.journal.remove_if_empty();
+        if let Some(journal) = &tab.journal {
+            journal.remove_if_empty();
+        }
     }
 }
 
 // helpers
 
-pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<OpenTab> {
-    let store = ProjectStore {
-        root: root.to_path_buf(),
-    };
+fn tab_name(root: &Path) -> String {
+    root.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string())
+}
+
+fn placeholder_tab(root: &Path, id: u64) -> OpenTab {
+    OpenTab {
+        id,
+        name: tab_name(root),
+        store: ProjectStore {
+            root: root.to_path_buf(),
+        },
+        journal: None,
+        merge: MergeState::default(),
+        files: HashMap::new(),
+        pending: Vec::new(),
+        state: PersistenceState::default(),
+        state_dirty: false,
+        checkpoint_dirty: false,
+        opened: false,
+        loaded: false,
+        undo: UndoStack::default(),
+        imports: ImportQueue::default(),
+        view: (DVec2::ZERO, 0.0),
+    }
+}
+
+fn open_tab(tab: &mut OpenTab, clock: &mut Clock) -> anyhow::Result<()> {
+    if tab.opened {
+        return Ok(());
+    }
+    let store = &tab.store;
     store.ensure_dirs()?;
 
-    let cached = local::load_state(root).unwrap_or_default();
+    let cached = local::load_state(&store.root).unwrap_or_default();
     let journal = Journal::create(&store.journal_dir(), clock.device_id())?;
     oplog::prune_empty_journals(&store.journal_dir(), journal.path());
 
@@ -528,7 +563,7 @@ pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<Op
         }
     };
     if read_ok {
-        let removed = import::sweep_orphaned_media(&store, &merge, import::MEDIA_RETENTION);
+        let removed = import::sweep_orphaned_media(store, &merge, import::MEDIA_RETENTION);
         if removed > 0 {
             info!("removed {removed} orphaned media file(s)");
         }
@@ -538,28 +573,18 @@ pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<Op
         clock.observe(rev);
     }
 
-    let name = root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
-    let view = local::load_view(root).unwrap_or((DVec2::ZERO, 0.0));
-    let tab = OpenTab {
-        id,
-        name,
-        store,
-        journal,
-        merge,
-        files,
-        pending: Vec::new(),
-        state: PersistenceState::default(),
-        state_dirty: false,
-        checkpoint_dirty: false,
-        loaded: false,
-        undo: UndoStack::default(),
-        imports: ImportQueue::default(),
-        view,
-    };
-    local::save_state(&tab.store.root, &tab.merge, &tab.files);
+    tab.journal = Some(journal);
+    tab.merge = merge;
+    tab.files = files;
+    tab.view = local::load_view(&store.root).unwrap_or((DVec2::ZERO, 0.0));
+    tab.opened = true;
+    local::save_state(&store.root, &tab.merge, &tab.files);
+    Ok(())
+}
+
+pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<OpenTab> {
+    let mut tab = placeholder_tab(root, id);
+    open_tab(&mut tab, clock)?;
     Ok(tab)
 }
 
@@ -572,6 +597,9 @@ fn ensure_loaded(
 ) -> anyhow::Result<()> {
     if tab.loaded {
         return Ok(());
+    }
+    if !tab.opened {
+        anyhow::bail!("tab not opened");
     }
     tab.state.saved.clear();
     persist::load_into_world(
@@ -605,10 +633,13 @@ fn save_active(
     if !tab.loaded {
         return;
     }
+    let Some(journal) = &mut tab.journal else {
+        return;
+    };
     tab.view = (view.center, view.log_scale);
     if persist::save_nodes(
         tab.id,
-        &mut tab.journal,
+        journal,
         &mut tab.merge,
         &mut tab.state,
         clock,

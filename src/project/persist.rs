@@ -518,6 +518,9 @@ pub fn autosave(
     if !tab.loaded {
         return;
     }
+    let Some(journal) = &mut tab.journal else {
+        return;
+    };
     tab.state.seconds_since_save += time.delta_secs();
     if tab.state.seconds_since_save < AUTOSAVE_INTERVAL {
         return;
@@ -527,7 +530,7 @@ pub fn autosave(
 
     if save_nodes(
         tab.id,
-        &mut tab.journal,
+        journal,
         &mut tab.merge,
         &mut tab.state,
         clock,
@@ -706,6 +709,9 @@ pub fn pump_preview_loads(
 
 /// persist local cache, camera and checkpoint on exit.
 pub fn save_on_exit(tab: &super::tabs::OpenTab, device: &str) {
+    let Some(journal) = &tab.journal else {
+        return;
+    };
     local::save_state(&tab.store.root, &tab.merge, &tab.files);
     local::save_view(&tab.store.root, tab.view.0, tab.view.1);
     if let Err(err) = oplog::write_checkpoint_and_trim(
@@ -713,7 +719,7 @@ pub fn save_on_exit(tab: &super::tabs::OpenTab, device: &str) {
         &tab.store.journal_dir(),
         device,
         &tab.merge,
-        tab.journal.path(),
+        journal.path(),
     ) {
         warn!("checkpoint write failed: {err:#}");
     }

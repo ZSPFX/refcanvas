@@ -570,6 +570,8 @@ fn remote_edits_apply_without_echoing_a_local_op() {
     // applying remote state must not make the local diff emit it back.
     let journal_path = f.app.world().resource::<Tabs>().stored[0]
         .journal
+        .as_ref()
+        .unwrap()
         .path()
         .to_path_buf();
     let before = std::fs::metadata(&journal_path).unwrap().len();
@@ -642,6 +644,27 @@ fn exit_writes_checkpoint_after_app_exit_event() {
         assert!(std::fs::read_dir(checkpoints).unwrap().next().is_some());
     }
     let _ = std::fs::remove_dir_all(&f.root);
+}
+
+#[test]
+fn placeholder_tabs_touch_nothing_until_opened() {
+    let root = std::env::temp_dir().join(format!(
+        "refcanvas-placeholder-{}-{}",
+        std::process::id(),
+        NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut tab = placeholder_tab(&root, 1);
+    assert!(!tab.opened);
+    assert!(tab.journal.is_none());
+    assert!(!root.join("journal").exists());
+
+    let mut clock = Clock::new("test".to_string(), 0, 0);
+    open_tab(&mut tab, &mut clock).unwrap();
+    assert!(tab.opened);
+    assert!(tab.journal.is_some());
+    assert!(root.join("journal").is_dir());
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

@@ -60,6 +60,9 @@ pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tab
 
     let mut newest: Option<oplog::Rev> = None;
     for tab in tabs.stored.iter_mut() {
+        if !tab.opened {
+            continue;
+        }
         match oplog::read_project(&tab.store.root, &mut tab.merge, &mut tab.files) {
             Ok(changes) => {
                 if !changes.is_empty() {
@@ -119,7 +122,7 @@ pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tab
         timer.checkpoint = 0.0;
         let device = tabs.clock.device_id().to_string();
         for tab in tabs.stored.iter_mut() {
-            if !tab.checkpoint_dirty {
+            if !tab.opened || !tab.checkpoint_dirty {
                 continue;
             }
             // snapshot off the frame thread; the journal is already durable, so
@@ -127,7 +130,10 @@ pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tab
             tab.checkpoint_dirty = false;
             let dir = tab.store.checkpoint_dir();
             let journal_dir = tab.store.journal_dir();
-            let keep = tab.journal.path().to_path_buf();
+            let Some(journal) = &tab.journal else {
+                continue;
+            };
+            let keep = journal.path().to_path_buf();
             let state = tab.merge.clone();
             let device = device.clone();
             std::thread::spawn(move || {
@@ -158,9 +164,12 @@ pub fn flush_local_before_remote(
         }
         let clock = &mut tabs.clock;
         let tab = &mut tabs.stored[index];
+        let Some(journal) = &mut tab.journal else {
+            continue;
+        };
         if persist::save_nodes(
             tab.id,
-            &mut tab.journal,
+            journal,
             &mut tab.merge,
             &mut tab.state,
             clock,

@@ -206,6 +206,7 @@ pub fn pick_topmost(
 pub fn press_label(
     entity: Entity,
     cursor_world: Vec2,
+    cursor_screen: Vec2,
     label_hits: &FrameLabelHits,
     rename: &mut FrameRename,
     selection: &mut Selection,
@@ -226,7 +227,7 @@ pub fn press_label(
     if double && rename.frame.is_none() {
         if let Ok((_, _, _, node)) = q.get(entity) {
             if let NodeKind::Frame(frame_node) = &node.kind {
-                rename.start(entity, frame_node.label.clone());
+                rename.start(entity, frame_node.label.clone(), cursor_screen);
                 selection.nodes = vec![entity];
                 return true;
             }
@@ -419,6 +420,7 @@ pub fn pointer_events(
         if press_label(
             entity,
             cursor_world,
+            cursor,
             &label_hits,
             &mut rename,
             &mut selection,

@@ -94,6 +94,20 @@ impl Tabs {
             .map(|t| t.store.root.clone())
     }
 
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        if from >= self.stored.len() || to >= self.stored.len() || from == to {
+            return;
+        }
+        let active = self.active_id();
+        let tab = self.stored.remove(from);
+        self.stored.insert(to, tab);
+        if let Some(id) = active
+            && let Some(index) = self.index_of(id)
+        {
+            self.active = index;
+        }
+    }
+
     fn new_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;

@@ -62,6 +62,8 @@ A GPU-accelerated infinite canvas for digital artists, written in Rust using Bev
 - Compare A/B test slider.
 - Arrangement compaction.
 - Change frame color.
+- Link Attachment.
+- Arrow node -> node.
 
 ## Download & Installation
 

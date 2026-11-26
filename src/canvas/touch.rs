@@ -392,6 +392,7 @@ pub fn touch_input(
                     if press_label(
                         entity,
                         world,
+                        started,
                         &label_hits,
                         &mut tap.rename,
                         &mut selection,

@@ -35,19 +35,6 @@ impl Accent {
     pub fn alpha(&self, a: f32) -> Color {
         Color::srgba(self.rgb[0], self.rgb[1], self.rgb[2], a)
     }
-
-    /// true when dark text reads better on it; relative luminance, threshold
-    /// tuned so mid-tone blues keep white text.
-    pub fn is_light(&self) -> bool {
-        let lin = |c: f32| {
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * lin(self.rgb[0]) + 0.7152 * lin(self.rgb[1]) + 0.0722 * lin(self.rgb[2]) > 0.35
-    }
 }
 
 pub struct ThemePlugin;

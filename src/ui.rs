@@ -1,6 +1,7 @@
 //! egui overlay: tab bar, context menus, status HUD.
 
 use bevy::ecs::system::NonSendMarker;
+use bevy::math::DVec2;
 use bevy::prelude::*;
 use bevy::time::Real;
 use bevy::window::PrimaryWindow;
@@ -9,11 +10,11 @@ use bevy_egui::{
     EguiContexts, EguiPrimaryContextPass,
     egui::{self, LayerId, UiBuilder},
 };
+use std::path::PathBuf;
 use winit::window::WindowLevel;
 
 use crate::canvas::camera::View;
-use crate::canvas::frames::{FrameLabelHits, FrameRename};
-use crate::canvas::grid::GridFade;
+use crate::canvas::frames::{self, FrameLabelHits, FrameRename};
 use crate::canvas::hit;
 use crate::canvas::manipulate::{self, ZCounter};
 use crate::canvas::node::{FrameLabel, NodeKind, NodeSnapshot, Pose};
@@ -29,12 +30,14 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ContextMenu>()
+            .init_resource::<TabMenu>()
             .init_resource::<AlwaysOnTop>()
             .add_systems(Update, apply_always_on_top)
             .add_systems(
                 EguiPrimaryContextPass,
                 (
                     apply_accent_style,
+                    close_on_navigate,
                     context_menu_input,
                     tab_bar,
                     hud,
@@ -90,6 +93,36 @@ struct ContextMenu {
     pos: Vec2,
     node: Option<Entity>,
     world: Vec2,
+    reset_open: bool,
+    reset_rect: Option<egui::Rect>,
+    reset_menu_rect: Option<egui::Rect>,
+}
+
+#[derive(Resource, Default)]
+struct TabMenu {
+    open: bool,
+    pos: egui::Pos2,
+    target: Option<TabMenuTarget>,
+}
+
+#[derive(Clone, Copy)]
+enum TabMenuTarget {
+    Tab(u64),
+    Project,
+}
+
+#[derive(Clone)]
+enum TabMenuAction {
+    Close(u64),
+    OpenFolder(PathBuf),
+    NewProject,
+    OpenProject,
+}
+
+#[derive(Default)]
+struct TabDrag {
+    id: Option<u64>,
+    grab: f32,
 }
 
 #[derive(Default)]
@@ -97,6 +130,49 @@ struct FpsCounter {
     frames: u32,
     elapsed: f32,
     fps: f32,
+}
+
+fn readable_text(bg: egui::Color32) -> egui::Color32 {
+    let lin = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let l = 0.2126 * lin(bg.r()) + 0.7152 * lin(bg.g()) + 0.0722 * lin(bg.b());
+    let black = (l + 0.05) / 0.05;
+    let white = 1.05 / (l + 0.05);
+    if black >= white {
+        egui::Color32::from_rgb(18, 18, 18)
+    } else {
+        egui::Color32::WHITE
+    }
+}
+
+/// close overlays as soon as the camera starts moving.
+fn close_on_navigate(
+    view: Res<View>,
+    mut last: Local<Option<(DVec2, f64)>>,
+    mut menu: ResMut<ContextMenu>,
+    mut tab_menu: ResMut<TabMenu>,
+    mut rename: ResMut<FrameRename>,
+) {
+    let current = (view.target_center, view.target_log_scale);
+    if let Some(prev) = *last
+        && prev != current
+    {
+        menu.open = false;
+        menu.reset_open = false;
+        menu.reset_rect = None;
+        menu.reset_menu_rect = None;
+        tab_menu.open = false;
+        if rename.frame.is_some() {
+            rename.clear();
+        }
+    }
+    *last = Some(current);
 }
 
 /// tint egui selection/hover visuals with the accent; applied on change only.
@@ -118,11 +194,7 @@ fn apply_accent_style(
             a,
         )
     };
-    let on_accent = if accent.is_light() {
-        egui::Color32::from_rgb(18, 18, 18)
-    } else {
-        egui::Color32::WHITE
-    };
+    let on_accent = readable_text(tint(255));
     // no style_mut here; all_styles_mut covers whichever theme is active.
     ctx.all_styles_mut(|style| {
         style.visuals.selection.bg_fill = tint(255);
@@ -134,34 +206,18 @@ fn apply_accent_style(
     Ok(())
 }
 
+#[derive(Clone)]
 enum MenuAction {
-    BringToFront,
-    SendToBack,
     ResetRotation,
     FlipH,
     FlipV,
+    Group,
     Reveal,
     Delete,
     ImportDialog,
     PasteFromClipboard,
-    SelectAll,
-    FrameAll,
-    ResetView,
-    ToggleGrid,
-    Align(AlignKind),
-    Distribute(bool),
     ResetCrop,
     ResetSize,
-}
-
-#[derive(Clone, Copy)]
-enum AlignKind {
-    Left,
-    CenterH,
-    Right,
-    Top,
-    MiddleV,
-    Bottom,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -186,6 +242,9 @@ fn context_menu_input(
     let pointer_over_egui = crate::canvas::egui_pointer_busy(&mut contexts);
     if keys.just_pressed(KeyCode::Escape) || (pointer.just_pressed && !pointer_over_egui) {
         menu.open = false;
+        menu.reset_open = false;
+        menu.reset_rect = None;
+        menu.reset_menu_rect = None;
     }
     let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
     if !mouse.just_pressed(MouseButton::Right)
@@ -214,6 +273,263 @@ fn context_menu_input(
     menu.pos = cursor;
     menu.node = node;
     menu.world = world;
+    menu.reset_open = false;
+    menu.reset_rect = None;
+    menu.reset_menu_rect = None;
+}
+
+fn menu_row_h(ui: &egui::Ui) -> f32 {
+    (ui.text_style_height(&egui::TextStyle::Button) + 10.0).max(ui.spacing().interact_size.y)
+}
+
+fn menu_row<A: Clone>(
+    ui: &mut egui::Ui,
+    hits: &mut Vec<(A, egui::Rect)>,
+    label: &str,
+    action: Option<A>,
+) -> bool {
+    menu_cell(
+        ui,
+        hits,
+        label,
+        action,
+        ui.available_width(),
+        menu_row_h(ui),
+    )
+}
+
+fn menu_cell<A: Clone>(
+    ui: &mut egui::Ui,
+    hits: &mut Vec<(A, egui::Rect)>,
+    label: &str,
+    action: Option<A>,
+    width: f32,
+    inset: f32,
+) -> bool {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(width, menu_row_h(ui)), egui::Sense::click());
+    paint_menu_row(ui, &resp, label, None, inset);
+    let clicked = resp.clicked();
+    if let Some(action) = action {
+        hits.push((action, rect));
+    }
+    clicked
+}
+
+fn menu_pair<A: Clone>(
+    ui: &mut egui::Ui,
+    hits: &mut Vec<(A, egui::Rect)>,
+    action: &mut Option<A>,
+    left: (&str, A),
+    right: (&str, A),
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let width = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
+        let gutter = menu_row_h(ui);
+        let (left_label, left_action) = left;
+        let (right_label, right_action) = right;
+        if menu_cell(
+            ui,
+            hits,
+            left_label,
+            Some(left_action.clone()),
+            width,
+            gutter,
+        ) {
+            *action = Some(left_action);
+        }
+        if menu_cell(
+            ui,
+            hits,
+            right_label,
+            Some(right_action.clone()),
+            width,
+            6.0,
+        ) {
+            *action = Some(right_action);
+        }
+    });
+}
+
+fn submenu_row(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let gutter = menu_row_h(ui);
+    let (_, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), gutter),
+        egui::Sense::click(),
+    );
+    paint_menu_row(ui, &resp, label, Some("⏵"), gutter);
+    resp
+}
+
+fn paint_menu_row(
+    ui: &egui::Ui,
+    resp: &egui::Response,
+    label: &str,
+    arrow: Option<&str>,
+    inset: f32,
+) {
+    let rect = resp.rect;
+    let hot = resp.contains_pointer() || resp.is_pointer_button_down_on();
+    if hot {
+        let fill = ui.visuals().widgets.hovered.weak_bg_fill;
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(2), fill);
+    }
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let color = if hot {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().text_color()
+    };
+    ui.painter().text(
+        egui::pos2(rect.left() + inset, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font.clone(),
+        color,
+    );
+    if let Some(arrow) = arrow {
+        ui.painter().text(
+            egui::pos2(rect.right() - 6.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            arrow,
+            font,
+            color,
+        );
+    }
+}
+
+// hover-safe wedge between a row and its submenu
+fn submenu_bridge(pos: egui::Pos2, reset: Option<egui::Rect>, submenu: Option<egui::Rect>) -> bool {
+    let Some(reset) = reset else {
+        return false;
+    };
+    let Some(submenu) = submenu else {
+        return false;
+    };
+    let reset = egui::Rect::from_min_max(
+        egui::pos2(reset.left(), reset.top() - 8.0),
+        egui::pos2(reset.right() + 6.0, reset.bottom() + 8.0),
+    );
+    let submenu = submenu.expand(8.0);
+    if reset.contains(pos) || submenu.contains(pos) {
+        return true;
+    }
+    let a = reset.right_top();
+    let b = reset.right_bottom();
+    in_triangle(pos, a, b, submenu.left_top()) || in_triangle(pos, a, b, submenu.left_bottom())
+}
+
+fn in_triangle(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2, c: egui::Pos2) -> bool {
+    let cross = |a: egui::Pos2, b: egui::Pos2, p: egui::Pos2| {
+        (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+    };
+    let d1 = cross(a, b, p);
+    let d2 = cross(b, c, p);
+    let d3 = cross(c, a, p);
+    let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(neg && pos)
+}
+
+fn tab_menu_ui(
+    ctx: &egui::Context,
+    menu: &mut TabMenu,
+    tabs: &Tabs,
+    just_opened: bool,
+) -> Option<TabMenuAction> {
+    if !menu.open {
+        return None;
+    }
+    let Some(target) = menu.target else {
+        menu.open = false;
+        return None;
+    };
+    let mut action: Option<TabMenuAction> = None;
+    let mut hits: Vec<(TabMenuAction, egui::Rect)> = Vec::new();
+    let area = egui::Area::new(egui::Id::new("refcanvas_tab_menu"))
+        .fixed_pos(menu.pos)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(190.0);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.with_layout(
+                    egui::Layout::top_down_justified(egui::Align::Min),
+                    |ui| match target {
+                        TabMenuTarget::Tab(id) => {
+                            if tabs.len() > 1
+                                && menu_row(
+                                    ui,
+                                    &mut hits,
+                                    "Close tab",
+                                    Some(TabMenuAction::Close(id)),
+                                )
+                            {
+                                action = Some(TabMenuAction::Close(id));
+                            }
+                            if let Some(root) = tabs.root_of(id) {
+                                let open = TabMenuAction::OpenFolder(root.clone());
+                                if menu_row(
+                                    ui,
+                                    &mut hits,
+                                    "Open project folder",
+                                    Some(open.clone()),
+                                ) {
+                                    action = Some(open);
+                                }
+                            }
+                        }
+                        TabMenuTarget::Project => {
+                            if menu_row(
+                                ui,
+                                &mut hits,
+                                "New project…",
+                                Some(TabMenuAction::NewProject),
+                            ) {
+                                action = Some(TabMenuAction::NewProject);
+                            }
+                            if menu_row(
+                                ui,
+                                &mut hits,
+                                "Open project…",
+                                Some(TabMenuAction::OpenProject),
+                            ) {
+                                action = Some(TabMenuAction::OpenProject);
+                            }
+                        }
+                    },
+                );
+            });
+        });
+    let rect = area.response.rect;
+    let pointer = ctx.input(|i| i.pointer.interact_pos());
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        menu.open = false;
+    }
+    if !just_opened {
+        let outside = pointer.is_some_and(|p| !rect.contains(p));
+        if outside
+            && (ctx.input(|i| i.pointer.primary_pressed())
+                || ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary)))
+        {
+            menu.open = false;
+        }
+    }
+    if ctx.input(|i| i.pointer.button_released(egui::PointerButton::Secondary))
+        && let Some(p) = pointer
+        && p.distance(menu.pos) > 4.0
+    {
+        if let Some((act, _)) = hits.iter().rev().find(|(_, r)| r.contains(p)) {
+            action = Some(act.clone());
+        }
+        menu.open = false;
+    }
+    if action.is_some() {
+        menu.open = false;
+    }
+    action
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -221,154 +537,143 @@ fn context_menu_ui(
     mut contexts: EguiContexts,
     mut menu: ResMut<ContextMenu>,
     mut selection: ResMut<Selection>,
-    mut zc: ResMut<ZCounter>,
     mut commands: Commands,
     mut q: NodeQ,
     tabs: Res<Tabs>,
-    mut view: ResMut<View>,
-    window: Single<&Window, With<PrimaryWindow>>,
-    mut grid_fade: ResMut<GridFade>,
     mut system_clipboard: ResMut<SystemClipboard>,
     mut interaction: ResMut<Interaction>,
     mut undo: ResMut<UndoStack>,
     mut dialogs: NonSendMut<crate::dialogs::Dialogs>,
-    q_own: Query<
-        (Entity, &crate::canvas::node::TabOwner),
-        Without<crate::canvas::node::InactiveTab>,
-    >,
+    mut zc: ResMut<ZCounter>,
+    view: Res<View>,
 ) -> Result {
     if !menu.open {
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
     let mut action: Option<MenuAction> = None;
+    let mut hits: Vec<(MenuAction, egui::Rect)> = Vec::new();
     let pos = menu.pos;
     let has_node = menu.node.is_some();
+    let pointer = ctx.input(|i| i.pointer.interact_pos());
+    let keep_reset =
+        pointer.is_some_and(|p| submenu_bridge(p, menu.reset_rect, menu.reset_menu_rect));
+    let mut reset_rect: Option<egui::Rect> = None;
+    let mut reset_hover = false;
+    let mut menu_margin = egui::Margin::ZERO;
 
-    egui::Area::new(egui::Id::new("refcanvas_ctx"))
+    let menu_area = egui::Area::new(egui::Id::new("refcanvas_ctx"))
         .fixed_pos(egui::pos2(pos.x, pos.y))
         .order(egui::Order::Foreground)
+        .info(egui::UiStackInfo::new(egui::UiKind::Popup))
         .show(ctx, |ui| {
+            menu_margin = ui.style().spacing.menu_margin;
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(190.0);
-                if has_node {
-                    if ui.button("Bring to Front").clicked() {
-                        action = Some(MenuAction::BringToFront);
-                    }
-                    if ui.button("Send to Back").clicked() {
-                        action = Some(MenuAction::SendToBack);
-                    }
-                    if ui.button("Reset Rotation").clicked() {
-                        action = Some(MenuAction::ResetRotation);
-                    }
-                    if ui.button("Reset Crop").clicked() {
-                        action = Some(MenuAction::ResetCrop);
-                    }
-                    if ui.button("Reset Size").clicked() {
-                        action = Some(MenuAction::ResetSize);
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Flip H").clicked() {
-                            action = Some(MenuAction::FlipH);
+                ui.set_width(190.0);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                    if has_node {
+                        let reset = submenu_row(ui, "Reset");
+                        reset_rect = Some(reset.rect);
+                        reset_hover = reset.contains_pointer();
+                        menu_pair(
+                            ui,
+                            &mut hits,
+                            &mut action,
+                            ("Flip H", MenuAction::FlipH),
+                            ("Flip V", MenuAction::FlipV),
+                        );
+                        if !selection.nodes.is_empty() {
+                            let label = format!("Group ({})", format_count(selection.nodes.len()));
+                            if menu_row(ui, &mut hits, &label, Some(MenuAction::Group)) {
+                                action = Some(MenuAction::Group);
+                            }
                         }
-                        if ui.button("Flip V").clicked() {
-                            action = Some(MenuAction::FlipV);
-                        }
-                    });
-                    if selection.nodes.len() >= 2 {
                         ui.separator();
-                        ui.horizontal(|ui| {
-                            if ui.button("Left").clicked() {
-                                action = Some(MenuAction::Align(AlignKind::Left));
-                            }
-                            if ui.button("Center").clicked() {
-                                action = Some(MenuAction::Align(AlignKind::CenterH));
-                            }
-                            if ui.button("Right").clicked() {
-                                action = Some(MenuAction::Align(AlignKind::Right));
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.button("Top").clicked() {
-                                action = Some(MenuAction::Align(AlignKind::Top));
-                            }
-                            if ui.button("Middle").clicked() {
-                                action = Some(MenuAction::Align(AlignKind::MiddleV));
-                            }
-                            if ui.button("Bottom").clicked() {
-                                action = Some(MenuAction::Align(AlignKind::Bottom));
-                            }
-                        });
-                        if selection.nodes.len() >= 3 {
-                            ui.horizontal(|ui| {
-                                if ui.button("Distribute H").clicked() {
-                                    action = Some(MenuAction::Distribute(true));
-                                }
-                                if ui.button("Distribute V").clicked() {
-                                    action = Some(MenuAction::Distribute(false));
-                                }
-                            });
+                        if menu_row(
+                            ui,
+                            &mut hits,
+                            "Show in File Manager",
+                            Some(MenuAction::Reveal),
+                        ) {
+                            action = Some(MenuAction::Reveal);
                         }
+                        ui.separator();
+                        if menu_row(ui, &mut hits, "Delete", Some(MenuAction::Delete)) {
+                            action = Some(MenuAction::Delete);
+                        }
+                    } else {
+                        if menu_row(
+                            ui,
+                            &mut hits,
+                            "Import images…",
+                            Some(MenuAction::ImportDialog),
+                        ) {
+                            action = Some(MenuAction::ImportDialog);
+                        }
+                        if menu_row(
+                            ui,
+                            &mut hits,
+                            "Paste from clipboard",
+                            Some(MenuAction::PasteFromClipboard),
+                        ) {
+                            action = Some(MenuAction::PasteFromClipboard);
+                        }
+                        ui.separator();
+                        menu_row(ui, &mut hits, "Settings", None);
                     }
-                    ui.separator();
-                    if ui.button("Show in File Manager").clicked() {
-                        action = Some(MenuAction::Reveal);
-                    }
-                    ui.separator();
-                    if ui.button("Delete").clicked() {
-                        action = Some(MenuAction::Delete);
-                    }
-                } else {
-                    if ui.button("Import images…").clicked() {
-                        action = Some(MenuAction::ImportDialog);
-                    }
-                    if ui.button("Paste from clipboard").clicked() {
-                        action = Some(MenuAction::PasteFromClipboard);
-                    }
-                    ui.separator();
-                    if ui.button("Select All").clicked() {
-                        action = Some(MenuAction::SelectAll);
-                    }
-                    if ui.button("Frame All").clicked() {
-                        action = Some(MenuAction::FrameAll);
-                    }
-                    if ui.button("Reset Zoom (100%)").clicked() {
-                        action = Some(MenuAction::ResetView);
-                    }
-                    if ui.button("Toggle Grid").clicked() {
-                        action = Some(MenuAction::ToggleGrid);
-                    }
-                }
+                });
             });
         });
+
+    menu.reset_rect = reset_rect;
+    menu.reset_open = reset_hover || (menu.reset_open && keep_reset);
+    if menu.reset_open
+        && let Some(reset) = reset_rect
+    {
+        let x = menu_area.response.rect.right() + 2.0;
+        let y = reset.top() - menu_margin.top as f32;
+        let submenu = egui::Area::new(egui::Id::new("refcanvas_ctx_reset"))
+            .fixed_pos(egui::pos2(x, y))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(130.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                        if menu_row(ui, &mut hits, "Rotation", Some(MenuAction::ResetRotation)) {
+                            action = Some(MenuAction::ResetRotation);
+                        }
+                        if menu_row(ui, &mut hits, "Crop", Some(MenuAction::ResetCrop)) {
+                            action = Some(MenuAction::ResetCrop);
+                        }
+                        if menu_row(ui, &mut hits, "Size", Some(MenuAction::ResetSize)) {
+                            action = Some(MenuAction::ResetSize);
+                        }
+                    });
+                });
+            });
+        menu.reset_menu_rect = Some(submenu.response.rect);
+    } else {
+        menu.reset_menu_rect = None;
+    }
+
+    let released = ctx.input(|i| i.pointer.button_released(egui::PointerButton::Secondary));
+    if released && let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+        let opened = egui::pos2(menu.pos.x, menu.pos.y);
+        if p.distance(opened) > 4.0 {
+            if let Some((act, _)) = hits.iter().rev().find(|(_, rect)| rect.contains(p)) {
+                action = Some(act.clone());
+            }
+            menu.open = false;
+            menu.reset_open = false;
+            menu.reset_menu_rect = None;
+        }
+    }
 
     if let Some(action) = action {
         menu.open = false;
         match action {
-            MenuAction::BringToFront => {
-                let before = capture_snapshots(&q, &selection);
-                for e in selection.nodes.clone() {
-                    if let Ok((_, mut tf, _, _)) = q.get_mut(e) {
-                        tf.translation.z = zc.next();
-                    }
-                }
-                commit_changed(&mut undo, &q, before);
-            }
-            MenuAction::SendToBack => {
-                let before = capture_snapshots(&q, &selection);
-                let min_z = q
-                    .iter()
-                    .map(|(_, tf, _, _)| tf.translation.z)
-                    .fold(f32::INFINITY, f32::min);
-                let mut z = min_z - 1.0;
-                for e in selection.nodes.clone() {
-                    if let Ok((_, mut tf, _, _)) = q.get_mut(e) {
-                        tf.translation.z = z;
-                        z -= 1.0;
-                    }
-                }
-                commit_changed(&mut undo, &q, before);
-            }
             MenuAction::ResetRotation => {
                 let before = capture_snapshots(&q, &selection);
                 for e in selection.nodes.clone() {
@@ -397,6 +702,18 @@ fn context_menu_ui(
                 }
                 commit_changed(&mut undo, &q, before);
             }
+            MenuAction::Group => {
+                let tab_id = tabs.active_id().unwrap_or(0);
+                frames::group_selection(
+                    &selection,
+                    &q,
+                    tab_id,
+                    view.scale() as f32,
+                    &mut zc,
+                    &mut commands,
+                    &mut undo,
+                );
+            }
             MenuAction::Reveal => {
                 if let Some(target) = menu.node {
                     if let Ok((_, _, _, node)) = q.get(target) {
@@ -422,28 +739,6 @@ fn context_menu_ui(
             }
             MenuAction::PasteFromClipboard => {
                 crate::clipboard::request_paste(&mut system_clipboard, menu.world);
-            }
-            MenuAction::SelectAll => {
-                let keep = selection::owner_filter(tabs.active_id(), &q_own);
-                manipulate::select_all(&q, keep, &mut selection);
-            }
-            MenuAction::FrameAll => {
-                let keep = selection::owner_filter(tabs.active_id(), &q_own);
-                let poses: Vec<_> = q
-                    .iter()
-                    .filter(|(e, ..)| keep(*e))
-                    .map(|(_, tf, _, node)| manipulate::current_pose(tf, node))
-                    .collect();
-                if !poses.is_empty() {
-                    manipulate::focus_poses(&poses, window.size(), &mut view);
-                }
-            }
-            MenuAction::ResetView => {
-                let center = view.center;
-                view.fly_to(center, 0.0);
-            }
-            MenuAction::ToggleGrid => {
-                grid_fade.0 = if grid_fade.0 > 0.5 { 0.0 } else { 1.0 };
             }
             MenuAction::ResetCrop => {
                 let before = capture_snapshots(&q, &selection);
@@ -485,110 +780,9 @@ fn context_menu_ui(
                 }
                 commit_changed(&mut undo, &q, before);
             }
-            MenuAction::Align(kind) => {
-                align_selection(kind, &mut q, &selection, &mut undo);
-            }
-            MenuAction::Distribute(horizontal) => {
-                distribute_selection(horizontal, &mut q, &selection, &mut undo);
-            }
         }
     }
     Ok(())
-}
-
-fn align_selection(kind: AlignKind, q: &mut NodeQ, selection: &Selection, undo: &mut UndoStack) {
-    let before = capture_snapshots(q, selection);
-    let mut items: Vec<(Entity, Pose)> = selection
-        .nodes
-        .iter()
-        .filter_map(|e| {
-            q.get(*e)
-                .ok()
-                .map(|(_, tf, _, n)| (*e, manipulate::current_pose(tf, n)))
-        })
-        .collect();
-    let Some(union) = manipulate::union_aabb(&items.iter().map(|(_, p)| *p).collect::<Vec<_>>())
-    else {
-        return;
-    };
-    for (e, pose) in items.drain(..) {
-        let aabb = crate::canvas::hit::aabb_of(&pose);
-        let delta = match kind {
-            AlignKind::Left => Vec2::new(union.min.x - aabb.min.x, 0.0),
-            AlignKind::CenterH => Vec2::new(union.center().x - aabb.center().x, 0.0),
-            AlignKind::Right => Vec2::new(union.max.x - aabb.max.x, 0.0),
-            AlignKind::Top => Vec2::new(0.0, union.max.y - aabb.max.y),
-            AlignKind::MiddleV => Vec2::new(0.0, union.center().y - aabb.center().y),
-            AlignKind::Bottom => Vec2::new(0.0, union.min.y - aabb.min.y),
-        };
-        if let Ok((_, mut tf, mut sprite, mut node)) = q.get_mut(e) {
-            let new_pose = Pose {
-                center: pose.center + delta,
-                ..pose
-            };
-            manipulate::set_pose(&mut tf, Some(&mut sprite), &mut node, &new_pose);
-        }
-    }
-    commit_changed(undo, q, before);
-}
-
-fn distribute_selection(
-    horizontal: bool,
-    q: &mut NodeQ,
-    selection: &Selection,
-    undo: &mut UndoStack,
-) {
-    let before = capture_snapshots(q, selection);
-    let mut items: Vec<(Entity, Pose)> = selection
-        .nodes
-        .iter()
-        .filter_map(|e| {
-            q.get(*e)
-                .ok()
-                .map(|(_, tf, _, n)| (*e, manipulate::current_pose(tf, n)))
-        })
-        .collect();
-    if items.len() < 3 {
-        return;
-    }
-    let poses: Vec<Pose> = items.iter().map(|(_, p)| *p).collect();
-    let Some(union) = manipulate::union_aabb(&poses) else {
-        return;
-    };
-    let key = |p: &Pose| if horizontal { p.center.x } else { p.center.y };
-    items.sort_by(|a, b| key(&a.1).total_cmp(&key(&b.1)));
-
-    let size_of = |p: &Pose| {
-        let r = crate::canvas::hit::aabb_of(p);
-        if horizontal { r.size().x } else { r.size().y }
-    };
-    let total: f32 = items.iter().map(|(_, p)| size_of(p)).sum();
-    let span = if horizontal {
-        union.size().x
-    } else {
-        union.size().y
-    };
-    let gap = ((span - total) / (items.len() - 1) as f32).max(0.0);
-
-    let mut cursor = if horizontal { union.min.x } else { union.min.y };
-    for (e, pose) in items.drain(..) {
-        let s = size_of(&pose);
-        let target = cursor + s * 0.5;
-        cursor += s + gap;
-        let delta = if horizontal {
-            Vec2::new(target - pose.center.x, 0.0)
-        } else {
-            Vec2::new(0.0, target - pose.center.y)
-        };
-        if let Ok((_, mut tf, mut sprite, mut node)) = q.get_mut(e) {
-            let new_pose = Pose {
-                center: pose.center + delta,
-                ..pose
-            };
-            manipulate::set_pose(&mut tf, Some(&mut sprite), &mut node, &new_pose);
-        }
-    }
-    commit_changed(undo, q, before);
 }
 
 fn capture_snapshots(q: &NodeQ, selection: &Selection) -> Vec<(Entity, NodeSnapshot)> {
@@ -768,39 +962,54 @@ fn frame_rename_ui(
         }
     };
     let (camera, cam_tf) = *camera;
-    // off-screen: keep the edit alive, just skip drawing.
-    let Ok(pos) = camera.world_to_viewport(cam_tf, anchor.extend(0.0)) else {
-        return Ok(());
+    let pos = match rename.screen_pos {
+        Some(pos) => pos,
+        None => match camera.world_to_viewport(cam_tf, anchor.extend(0.0)) {
+            Ok(pos) => pos,
+            // off-screen: keep the edit alive, just skip drawing.
+            Err(_) => return Ok(()),
+        },
     };
 
     let mut commit = false;
     let mut cancel = false;
-    egui::Area::new(egui::Id::new("refcanvas_frame_rename"))
+    let mut area = egui::Area::new(egui::Id::new("refcanvas_frame_rename"))
         .fixed_pos(egui::pos2(pos.x, pos.y))
-        .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut rename.text)
-                        .desired_width(width)
-                        .hint_text("Frame name"),
-                );
-                if rename.focus_me {
-                    resp.request_focus();
-                    rename.focus_me = false;
+        .order(egui::Order::Foreground);
+    if rename.screen_pos.is_some() {
+        area = area
+            .pivot(egui::Align2::LEFT_CENTER)
+            .fixed_pos(egui::pos2(pos.x - width * 0.3, pos.y));
+    }
+    area.show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            let output = egui::TextEdit::singleline(&mut rename.text)
+                .desired_width(width)
+                .hint_text("Frame name")
+                .show(ui);
+            let resp = output.response;
+            if rename.focus_me {
+                resp.request_focus();
+                let end = egui::text::CCursor::new(rename.text.chars().count());
+                let mut state = output.state;
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                state.store(ctx, resp.id);
+                rename.focus_me = false;
+            }
+            if resp.has_focus() {
+                rename.had_focus = true;
+            }
+            if rename.had_focus {
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                } else if resp.lost_focus() {
+                    commit = true;
                 }
-                if resp.has_focus() {
-                    rename.had_focus = true;
-                }
-                if rename.had_focus {
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        cancel = true;
-                    } else if resp.lost_focus() {
-                        commit = true;
-                    }
-                }
-            });
+            }
         });
+    });
 
     if cancel {
         rename.clear();
@@ -846,18 +1055,21 @@ fn pin_icon(ctx: &egui::Context) -> PinIcon {
 
 fn tab_bar(
     mut contexts: EguiContexts,
-    tabs: Res<Tabs>,
+    mut tabs: ResMut<Tabs>,
     mut requests: ResMut<TabRequests>,
     mut always_on_top: ResMut<AlwaysOnTop>,
     mut dialogs: NonSendMut<crate::dialogs::Dialogs>,
     mut dialog_results: ResMut<crate::dialogs::DialogResults>,
     // folder picker reports only a path, so remember which menu asked.
     mut folder_pick_is_new: Local<bool>,
+    mut tab_menu: ResMut<TabMenu>,
+    mut drag: Local<TabDrag>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let mut pending: Vec<TabRequest> = Vec::new();
     let mut open_new = false;
     let mut open_existing = false;
+    let mut just_opened = false;
 
     let mut root = egui::Ui::new(
         ctx.clone(),
@@ -874,51 +1086,116 @@ fn tab_bar(
         .frame(tabs_frame)
         .show(&mut root, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = 3.0;
                 // tallest tab sets the "+" button size.
                 let mut row_h = ui.spacing().interact_size.y;
                 let active = tabs.active_id();
-                for (id, name) in tabs.summaries() {
+                let spacing = 3.0;
+                let start_x = ui.cursor().min.x;
+                let top = ui.cursor().min.y;
+                let pointer = ctx.input(|i| i.pointer.interact_pos());
+                let primary_down =
+                    ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+                if !primary_down {
+                    drag.id = None;
+                }
+                let mut list = tabs.summaries();
+                let mut widths: Vec<f32> = list.iter().map(|(_, n)| tab_width(ui, n)).collect();
+                let total_w = |widths: &[f32]| {
+                    widths.iter().sum::<f32>() + spacing * widths.len().saturating_sub(1) as f32
+                };
+
+                if drag.id.is_none()
+                    && ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+                    && let Some(p) = pointer
+                {
+                    let mut x = start_x;
+                    for ((id, _), w) in list.iter().zip(&widths) {
+                        let rect =
+                            egui::Rect::from_min_size(egui::pos2(x, top), egui::vec2(*w, row_h));
+                        if rect.contains(p) {
+                            drag.id = Some(*id);
+                            drag.grab = p.x - x;
+                            break;
+                        }
+                        x += w + spacing;
+                    }
+                }
+
+                // follow the pointer, then let the other tabs slide to their new slot.
+                let mut drag_x = None;
+                if let (Some(id), Some(p)) = (drag.id, pointer)
+                    && let Some(from) = list.iter().position(|(tid, _)| *tid == id)
+                {
+                    let max_x = (start_x + total_w(&widths) - widths[from]).max(start_x);
+                    let x = (p.x - drag.grab).clamp(start_x, max_x);
+                    let mut to = 0;
+                    let mut slot = start_x;
+                    for (i, w) in widths.iter().enumerate() {
+                        if i == from {
+                            slot += w + spacing;
+                            continue;
+                        }
+                        if slot + w * 0.5 < p.x {
+                            to += 1;
+                        }
+                        slot += w + spacing;
+                    }
+                    drag_x = Some(x);
+                    if to != from {
+                        tabs.move_tab(from, to);
+                        list = tabs.summaries();
+                        widths = list.iter().map(|(_, n)| tab_width(ui, n)).collect();
+                    }
+                }
+
+                let anim = |id: u64| egui::Id::new(("refcanvas_tab_slide", id));
+                let dragged = drag.id;
+                let mut responses: Vec<(u64, egui::Response)> = Vec::new();
+                let mut x = start_x;
+                for ((id, name), w) in list.iter().zip(&widths) {
+                    let slot = x;
+                    x += w + spacing;
+                    if Some(*id) == dragged {
+                        continue;
+                    }
+                    let shown = ctx.animate_value_with_time(anim(*id), slot, 0.12);
+                    let selected = Some(*id) == active;
+                    responses.push((*id, tab_button(ui, *id, name, *w, row_h, shown, selected)));
+                }
+                if let Some(id) = dragged
+                    && let Some(i) = list.iter().position(|(tid, _)| *tid == id)
+                {
+                    let slot = start_x + widths[..i].iter().sum::<f32>() + spacing * i as f32;
+                    let shown = ctx.animate_value_with_time(anim(id), drag_x.unwrap_or(slot), 0.04);
                     let selected = Some(id) == active;
+                    responses.push((
+                        id,
+                        tab_button(ui, id, &list[i].1, widths[i], row_h, shown, selected),
+                    ));
+                }
+                let row = egui::Rect::from_min_size(
+                    egui::pos2(start_x, top),
+                    egui::vec2(total_w(&widths), row_h),
+                );
+                ui.advance_cursor_after_rect(row);
 
-                    let resp = ui
-                        .scope(|ui| {
-                            let v = ui.visuals_mut();
-                            v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-                            v.widgets.hovered.expansion = 0.0;
-                            v.widgets.active.bg_stroke = egui::Stroke::NONE;
-                            v.widgets.active.expansion = 0.0;
-                            ui.selectable_label(selected, truncate(&name, 24))
-                        })
-                        .inner; // .inner is the label's response
+                for (id, resp) in responses {
                     row_h = row_h.max(resp.rect.height());
-
                     if resp.clicked() {
                         pending.push(TabRequest::Switch(id));
                     }
                     if resp.middle_clicked() {
                         pending.push(TabRequest::Close(id));
                     }
-                    resp.context_menu(|ui| {
-                        if ui
-                            .add_enabled(tabs.len() > 1, egui::Button::new("Close tab"))
-                            .clicked()
-                        {
-                            pending.push(TabRequest::Close(id));
-                            ui.close();
-                        }
-                        if let Some(root) = tabs.root_of(id) {
-                            if ui
-                                .button("Open project folder")
-                                .on_hover_text(root.display().to_string())
-                                .clicked()
-                            {
-                                open_folder(&root);
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.add_space(3.0);
+                    if resp.contains_pointer()
+                        && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary))
+                    {
+                        tab_menu.open = true;
+                        tab_menu.target = Some(TabMenuTarget::Tab(id));
+                        tab_menu.pos = resp.interact_pointer_pos().unwrap_or(resp.rect.center());
+                        just_opened = true;
+                    }
                 }
                 // pin toggles always-on-top, "+" opens the project menu; the plus
                 // is hand-drawn because the stock glyph isn't optically centred.
@@ -934,17 +1211,20 @@ fn tab_bar(
                     let wayland = crate::on_wayland();
                     let can_pin = !wayland || std::env::var_os("DISPLAY").is_some();
                     let icon = pin_icon(ctx);
-                    let button = egui::Button::new("").min_size(egui::vec2(side, side));
-                    let button = if always_on_top.0 {
-                        button.fill(egui::Color32::WHITE)
+                    let pinned = always_on_top.0;
+                    let button = egui::Button::new("")
+                        .min_size(egui::vec2(side, side))
+                        .frame_when_inactive(pinned);
+                    let button = if pinned {
+                        button.fill(ui.visuals().selection.bg_fill)
                     } else {
                         button
                     };
                     let pin_resp = ui.add_enabled(can_pin, button);
                     let tint = if !pin_resp.enabled() {
                         ui.visuals().weak_text_color()
-                    } else if always_on_top.0 {
-                        egui::Color32::from_gray(25)
+                    } else if pinned {
+                        egui::Color32::from_rgb(18, 18, 18)
                     } else {
                         ui.style().interact(&pin_resp).fg_stroke.color
                     };
@@ -970,19 +1250,17 @@ fn tab_bar(
                         crate::project::local::save_always_on_top(always_on_top.0);
                     }
 
-                    let (resp, _) = egui::containers::menu::MenuButton::from_button(
-                        egui::Button::new("").min_size(egui::vec2(side, side)),
-                    )
-                    .ui(ui, |ui| {
-                        if ui.button("New project…").clicked() {
-                            open_new = true;
-                            ui.close();
-                        }
-                        if ui.button("Open project…").clicked() {
-                            open_existing = true;
-                            ui.close();
-                        }
-                    });
+                    let resp = ui.add(
+                        egui::Button::new("")
+                            .min_size(egui::vec2(side, side))
+                            .frame_when_inactive(false),
+                    );
+                    if resp.clicked() {
+                        tab_menu.open = true;
+                        tab_menu.target = Some(TabMenuTarget::Project);
+                        tab_menu.pos = egui::pos2(resp.rect.left(), resp.rect.bottom() + 2.0);
+                        just_opened = true;
+                    }
                     {
                         let c = resp.rect.center();
                         let arm = side * 0.26;
@@ -1010,6 +1288,15 @@ fn tab_bar(
         )
     });
 
+    if let Some(action) = tab_menu_ui(ctx, &mut tab_menu, &tabs, just_opened) {
+        match action {
+            TabMenuAction::Close(id) => pending.push(TabRequest::Close(id)),
+            TabMenuAction::OpenFolder(root) => open_folder(&root),
+            TabMenuAction::NewProject => open_new = true,
+            TabMenuAction::OpenProject => open_existing = true,
+        }
+    }
+
     if let Some(dir) = dialog_results.folders.pop() {
         dialog_results.folders.clear();
         let new_project = *folder_pick_is_new;
@@ -1032,6 +1319,72 @@ fn tab_bar(
 
     requests.queue.extend(pending);
     Ok(())
+}
+
+fn format_count(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn tab_width(ui: &egui::Ui, name: &str) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let text = truncate(name, 24);
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(text, font, ui.visuals().text_color())
+        .size()
+        .x;
+    (text_w + 18.0).max(56.0)
+}
+
+fn tab_button(
+    ui: &mut egui::Ui,
+    id: u64,
+    name: &str,
+    width: f32,
+    row_h: f32,
+    x: f32,
+    selected: bool,
+) -> egui::Response {
+    let rect =
+        egui::Rect::from_min_size(egui::pos2(x, ui.cursor().min.y), egui::vec2(width, row_h));
+    let text_color = if selected {
+        readable_text(ui.visuals().selection.bg_fill)
+    } else {
+        ui.visuals().text_color()
+    };
+    let label = egui::RichText::new(truncate(name, 24)).color(text_color);
+    let mut tab_ui = ui.new_child(
+        UiBuilder::new()
+            .id(egui::Id::new(("refcanvas_tab", id)))
+            .max_rect(rect)
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::TopDown,
+            )),
+    );
+    tab_ui.spacing_mut().button_padding = egui::vec2(9.0, 2.0);
+    // flat hover: the default stroke shrinks content and grows the row.
+    let v = tab_ui.visuals_mut();
+    let corner = v.widgets.inactive.corner_radius;
+    v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+    v.widgets.hovered.expansion = 0.0;
+    v.widgets.hovered.corner_radius = corner;
+    v.widgets.active.bg_stroke = egui::Stroke::NONE;
+    v.widgets.active.expansion = 0.0;
+    v.widgets.active.corner_radius = corner;
+    v.widgets.open.corner_radius = corner;
+    tab_ui.add(
+        egui::Button::selectable(selected, label)
+            .min_size(egui::vec2(width, row_h))
+            .sense(egui::Sense::click_and_drag()),
+    )
 }
 
 fn truncate(s: &str, max: usize) -> String {

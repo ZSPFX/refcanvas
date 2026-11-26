@@ -10,9 +10,9 @@ use super::frames;
 use super::grid::GridFade;
 use super::hit;
 use super::manipulate::{self, ZCounter};
-use super::node::{InactiveTab, NodeSnapshot, Pose, TabOwner};
+use super::node::{InactiveTab, Pose, TabOwner};
 use super::selection::{self, Interaction, NodeQ, Selection};
-use super::undo::{NodeData, NodeRecord, UndoEntry, UndoStack};
+use super::undo::{UndoEntry, UndoStack};
 use crate::clipboard::{self, SystemClipboard};
 use crate::project::tabs::Tabs;
 
@@ -145,6 +145,11 @@ pub fn shortcuts(
     if ctrl && keys.just_pressed(KeyCode::KeyA) {
         let keep = selection::owner_filter(ctx.tabs.active_id(), &q_own);
         manipulate::select_all(&q, keep, &mut ctx.selection);
+
+        // focus entire thing
+        if let Some(frame) = selection::selection_frame_of(&q, &ctx.selection) {
+            manipulate::focus_poses(&[frame], window.size(), &mut ctx.view);
+        }
     }
     if ctrl && keys.just_pressed(KeyCode::KeyC) {
         let nodes = export::gather(&ctx.selection, &q);
@@ -181,49 +186,16 @@ pub fn shortcuts(
     }
 
     if ctrl && keys.just_pressed(KeyCode::KeyG) && !ctx.selection.nodes.is_empty() {
-        let poses: Vec<Pose> = selection::gather_snapshots(&q, &ctx.selection.nodes)
-            .into_iter()
-            .map(|(_, s)| s.pose)
-            .collect();
-        if let Some(bounds) = manipulate::union_aabb(&poses) {
-            let pad = 8.0 * ctx.view.scale() as f32;
-            // union aabb, not `selection_frame`: the single-node case returns its
-            // rotated rect, which would cut across the image instead of containing it.
-            let pose = Pose {
-                center: bounds.center(),
-                size: bounds.size() + Vec2::splat(pad * 2.0),
-                rot: 0.0,
-            };
-            let min_z = ctx
-                .selection
-                .nodes
-                .iter()
-                .filter_map(|e| q.get(*e).ok().map(|(_, tf, _, _)| tf.translation.z))
-                .fold(f32::INFINITY, f32::min);
-            // below every selected node; `min` first so a missing z (inf) can't
-            // put the frame on top.
-            let z = min_z.min(ctx.zc.0) - 0.5;
-            let tab_id = ctx.tabs.active_id().unwrap_or(0);
-            let label = "Frame".to_string();
-            let e = frames::spawn_frame(&mut commands, tab_id, true, None, label.clone(), pose, z);
-            // keep the framed nodes selected, not the new frame: its outline and
-            // handles would sit on the image and read as a second selection.
-            ctx.undo.push(UndoEntry::Added {
-                items: vec![NodeRecord {
-                    entity: e,
-                    tab_id,
-                    data: NodeData::Frame { label },
-                    snap: NodeSnapshot {
-                        pose,
-                        z,
-                        flip_x: false,
-                        flip_y: false,
-                        crop: Rect::from_corners(Vec2::ZERO, Vec2::ONE),
-                        px_scale: 1.0,
-                    },
-                }],
-            });
-        }
+        let tab_id = ctx.tabs.active_id().unwrap_or(0);
+        frames::group_selection(
+            &ctx.selection,
+            &q,
+            tab_id,
+            ctx.view.scale() as f32,
+            &mut ctx.zc,
+            &mut commands,
+            &mut ctx.undo,
+        );
     }
 
     if !ctrl

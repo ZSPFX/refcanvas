@@ -8,8 +8,12 @@ use bevy::text::TextLayoutInfo;
 
 use super::camera::View;
 use super::hit::{self, point_inside};
-use super::node::{InactiveTab, CanvasNode, FrameLabel, FrameNode, NodeKind, Pose, TabOwner};
-use super::selection::NodeQ;
+use super::manipulate::{self, ZCounter};
+use super::node::{
+    CanvasNode, FrameLabel, FrameNode, InactiveTab, NodeKind, NodeSnapshot, Pose, TabOwner,
+};
+use super::selection::{NodeQ, Selection};
+use super::undo::{NodeData, NodeRecord, UndoEntry, UndoStack};
 use crate::project::oplog::NodeId;
 use crate::project::tabs::Tabs;
 use crate::theme::Accent;
@@ -41,6 +45,8 @@ pub const LABEL_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_mi
 pub struct FrameRename {
     pub frame: Option<Entity>,
     pub text: String,
+    /// screen position of the triggering double-click
+    pub screen_pos: Option<Vec2>,
     /// grab focus on the next ui frame
     pub focus_me: bool,
     /// had focus at least once, so a failed focus request can't commit instantly
@@ -51,9 +57,10 @@ pub struct FrameRename {
 
 impl FrameRename {
     /// seed the editor with the current label
-    pub fn start(&mut self, frame: Entity, label: String) {
+    pub fn start(&mut self, frame: Entity, label: String, screen_pos: Vec2) {
         self.frame = Some(frame);
         self.text = label;
+        self.screen_pos = Some(screen_pos);
         self.focus_me = true;
         self.had_focus = false;
         self.last_click = None;
@@ -120,6 +127,54 @@ pub fn spawn_frame(
         commands.entity(label_entity).insert(InactiveTab);
     }
     frame
+}
+
+/// wrap the selected nodes in a frame; keeps the selection as-is.
+pub fn group_selection(
+    selection: &Selection,
+    q: &NodeQ,
+    tab_id: u64,
+    scale: f32,
+    zc: &mut ZCounter,
+    commands: &mut Commands,
+    undo: &mut UndoStack,
+) {
+    let poses: Vec<Pose> = super::selection::gather_snapshots(q, &selection.nodes)
+        .into_iter()
+        .map(|(_, snap)| snap.pose)
+        .collect();
+    let Some(bounds) = manipulate::union_aabb(&poses) else {
+        return;
+    };
+    let pad = 8.0 * scale;
+    let pose = Pose {
+        center: bounds.center(),
+        size: bounds.size() + Vec2::splat(pad * 2.0),
+        rot: 0.0,
+    };
+    let min_z = selection
+        .nodes
+        .iter()
+        .filter_map(|e| q.get(*e).ok().map(|(_, tf, _, _)| tf.translation.z))
+        .fold(f32::INFINITY, f32::min);
+    let z = min_z.min(zc.0) - 0.5;
+    let label = "Frame".to_string();
+    let entity = spawn_frame(commands, tab_id, true, None, label.clone(), pose, z);
+    undo.push(UndoEntry::Added {
+        items: vec![NodeRecord {
+            entity,
+            tab_id,
+            data: NodeData::Frame { label },
+            snap: NodeSnapshot {
+                pose,
+                z,
+                flip_x: false,
+                flip_y: false,
+                crop: Rect::from_corners(Vec2::ZERO, Vec2::ONE),
+                px_scale: 1.0,
+            },
+        }],
+    });
 }
 
 /// tint fills and labels with the desktop accent; it can change at runtime, so

@@ -160,6 +160,15 @@ pub fn touch_input(
 ) {
     let egui_busy = super::egui_pointer_busy(&mut contexts);
     let now = Instant::now();
+    let read_only = tabs.active_read_only();
+    if read_only
+        && !matches!(
+            *interaction,
+            Interaction::Idle | Interaction::Marquee { .. }
+        )
+    {
+        selection::cancel_interaction(&mut interaction, &mut q);
+    }
 
     pointer.just_pressed = false;
     pointer.just_released = false;
@@ -207,24 +216,28 @@ pub fn touch_input(
                     &label_hits,
                     hit::TOUCH_NODE_SLOP_PX * wpp,
                 );
-                let on_handle = selection::selection_frame_of(&q, &selection)
-                    .and_then(|frame| {
-                        let (handle_px, rotate_px) = hit::touch_radii(&frame, wpp);
-                        hit::hit_frame_with_radii(world, &frame, wpp, handle_px, rotate_px)
-                    })
-                    .is_some();
+                let on_handle = !read_only
+                    && selection::selection_frame_of(&q, &selection)
+                        .and_then(|frame| {
+                            let (handle_px, rotate_px) = hit::touch_radii(&frame, wpp);
+                            hit::hit_frame_with_radii(world, &frame, wpp, handle_px, rotate_px)
+                        })
+                        .is_some();
 
-                let double_tap = state.last_tap.is_some_and(|(t, p)| {
-                    now.duration_since(t) <= DOUBLE_TAP_MAX && p.distance(pos) <= DOUBLE_TAP_DIST_PX
-                });
+                let double_tap = !read_only
+                    && state.last_tap.is_some_and(|(t, p)| {
+                        now.duration_since(t) <= DOUBLE_TAP_MAX
+                            && p.distance(pos) <= DOUBLE_TAP_DIST_PX
+                    });
                 if double_tap {
                     state.last_tap = None;
                 }
 
                 // a drag edits an image only after a tap selected it; every other
                 // one-finger press pans. a tap that stops a fling becomes a pan.
-                let on_selected_node = hit.is_some_and(|(entity, _)| selection.contains(entity));
-                let pan = stopping || (!double_tap && !on_handle && !on_selected_node);
+                let on_selected_node =
+                    !read_only && hit.is_some_and(|(entity, _)| selection.contains(entity));
+                let pan = stopping || read_only || (!double_tap && !on_handle && !on_selected_node);
 
                 state.mode = Mode::Single;
                 state.primary = Some(id);
@@ -385,30 +398,36 @@ pub fn touch_input(
         if is_tap {
             if state.pan && !state.suppress_tap {
                 if let Some(entity) = state.press_node {
-                    let started = state.start.unwrap_or(pos);
-                    let world = camera
-                        .viewport_to_world_2d(cam_tf, started)
-                        .unwrap_or_default();
-                    if press_label(
-                        entity,
-                        world,
-                        started,
-                        &label_hits,
-                        &mut tap.rename,
-                        &mut selection,
-                        &q,
-                    ) {
-                        *interaction = Interaction::Idle;
-                    } else {
+                    if read_only {
                         if !selection.contains(entity) {
                             selection.nodes = vec![entity];
                         }
-                        let is_frame = q
-                            .get(entity)
-                            .map(|(_, _, _, node)| node.kind.is_frame())
-                            .unwrap_or(true);
-                        if !is_frame {
-                            manipulate::raise(entity, &mut q, &mut tap.zc);
+                    } else {
+                        let started = state.start.unwrap_or(pos);
+                        let world = camera
+                            .viewport_to_world_2d(cam_tf, started)
+                            .unwrap_or_default();
+                        if press_label(
+                            entity,
+                            world,
+                            started,
+                            &label_hits,
+                            &mut tap.rename,
+                            &mut selection,
+                            &q,
+                        ) {
+                            *interaction = Interaction::Idle;
+                        } else {
+                            if !selection.contains(entity) {
+                                selection.nodes = vec![entity];
+                            }
+                            let is_frame = q
+                                .get(entity)
+                                .map(|(_, _, _, node)| node.kind.is_frame())
+                                .unwrap_or(true);
+                            if !is_frame {
+                                manipulate::raise(entity, &mut q, &mut tap.zc);
+                            }
                         }
                     }
                 } else {

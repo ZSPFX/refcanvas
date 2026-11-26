@@ -200,7 +200,12 @@ pub fn handle_dropped_files(
     camera: Single<(&Camera, &GlobalTransform)>,
     view: Res<View>,
     mut queue: ResMut<ImportQueue>,
+    tabs: Res<Tabs>,
 ) {
+    if tabs.active_read_only() {
+        for _ in messages.read() {}
+        return;
+    }
     let mut paths = Vec::new();
     for msg in messages.read() {
         if let FileDragAndDrop::DroppedFile { path_buf, .. } = msg {
@@ -222,10 +227,15 @@ pub fn startup_import(
     startup: Option<Res<StartupImport>>,
     mut queue: ResMut<ImportQueue>,
     mut commands: Commands,
+    tabs: Res<Tabs>,
 ) {
     let Some(startup) = startup else {
         return;
     };
+    if tabs.active_read_only() {
+        commands.remove_resource::<StartupImport>();
+        return;
+    }
     info!("startup import: {}", startup.0.display());
     enqueue_paths(&mut queue, Vec2::ZERO, vec![startup.0.clone()]);
     commands.remove_resource::<StartupImport>();
@@ -241,7 +251,12 @@ pub fn dialog_import(
     mut contexts: EguiContexts,
     chord_mem: Res<crate::canvas::ChordMemory>,
     chord_frame: Res<crate::canvas::lod::FrameCounter>,
+    tabs: Res<Tabs>,
 ) {
+    if tabs.active_read_only() {
+        dialog_results.files.clear();
+        return;
+    }
     // finished pickers are collected first; the dialog itself never blocks.
     if !dialog_results.files.is_empty() {
         let paths = std::mem::take(&mut dialog_results.files);
@@ -259,7 +274,14 @@ pub fn dialog_import(
     dialogs.pick_images();
 }
 
-pub fn pump_import_queue(mut queue: ResMut<ImportQueue>, store: Res<ProjectStore>) {
+pub fn pump_import_queue(
+    mut queue: ResMut<ImportQueue>,
+    store: Res<ProjectStore>,
+    tabs: Res<Tabs>,
+) {
+    if tabs.active_read_only() {
+        return;
+    }
     while queue.in_flight.len() < MAX_IN_FLIGHT {
         let Some((index, source)) = queue.pending.pop_front() else {
             break;
@@ -290,6 +312,11 @@ pub fn collect_imports(
     mut undo: ResMut<UndoStack>,
     tabs: Res<Tabs>,
 ) {
+    if tabs.active_read_only() {
+        queue.pending.clear();
+        queue.in_flight.clear();
+        return;
+    }
     let mut done: Vec<Incoming> = Vec::new();
     let mut i = 0;
     while i < queue.in_flight.len() {
@@ -513,6 +540,9 @@ pub fn sweep_orphaned_media(
     if merge.nodes.is_empty() {
         return 0;
     }
+    if merge.read_only {
+        return 0;
+    }
     let mut images = HashSet::new();
     let mut hashes = HashSet::new();
     for (_, node) in merge.visible_nodes() {
@@ -674,6 +704,37 @@ mod tests {
                 .join("orphan_512.jpg.sync-conflict-20260101-000000-ABCDEFG")
                 .exists()
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_only_projects_pause_media_sweep() {
+        let root = std::env::temp_dir().join(format!(
+            "refcanvas-media-readonly-{}-{}",
+            std::process::id(),
+            Uuid::now_v7()
+        ));
+        let store = ProjectStore { root: root.clone() };
+        store.ensure_dirs().unwrap();
+        std::fs::write(store.images_dir().join("orphan.png"), b"x").unwrap();
+        let mut merge = MergeState {
+            read_only: true,
+            read_only_v: 2,
+            ..Default::default()
+        };
+        merge.merge(
+            Uuid::now_v7(),
+            Rev {
+                w: 1,
+                c: 0,
+                d: "dev".to_string(),
+                n: 0,
+            },
+            false,
+            Some(image_node("images/used.png", "used")),
+        );
+        assert_eq!(sweep_orphaned_media(&store, &merge, Duration::ZERO), 0);
+        assert!(store.images_dir().join("orphan.png").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 }

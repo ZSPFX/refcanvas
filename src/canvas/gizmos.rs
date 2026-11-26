@@ -78,6 +78,7 @@ pub fn draw_selection(
     interaction: Res<Interaction>,
     view: Res<View>,
     accent: Res<Accent>,
+    tabs: Res<Tabs>,
     q: Query<(&Transform, &CanvasNode), Without<InactiveTab>>,
 ) {
     let wpp = view.scale() as f32;
@@ -92,36 +93,38 @@ pub fn draw_selection(
         let iso = Isometry2d::new(frame.center, Rot2::radians(frame.rot));
         gizmos.rect_2d(iso, frame.size, accent_color);
 
-        let hs = 6.0 * wpp;
-        for i in 0..4 {
-            handle_square(&mut gizmos, corner_world(&frame, i), hs, accent_color);
-        }
-        for i in 0..4 {
-            handle_square(&mut gizmos, edge_world(&frame, i), hs, accent_color);
-        }
+        if !tabs.active_read_only() {
+            let hs = 6.0 * wpp;
+            for i in 0..4 {
+                handle_square(&mut gizmos, corner_world(&frame, i), hs, accent_color);
+            }
+            for i in 0..4 {
+                handle_square(&mut gizmos, edge_world(&frame, i), hs, accent_color);
+            }
 
-        // rotation hints: short lines along the offset edges of a phantom rounded
-        // rect, joined by a quarter arc, marking the rotate zone just outside.
-        let rot = rot2(frame.rot);
-        let gap = ROTATE_HINT_GAP * wpp;
-        // shrink the elbow on tiny selections so hints and stubs can't collide.
-        let side = frame.size.x.min(frame.size.y);
-        let radius = (ROTATE_HINT_RADIUS * wpp).min((side * 0.5 - gap).max(1.0));
-        let tail = (ROTATE_HINT_TAIL * wpp).min(side * 0.25);
-        for i in 0..4 {
-            let d = CORNER_DIRS[i];
-            let outer = corner_world(&frame, i) + rot * (d * gap);
-            // rounded-rectangle corner: arc center pulled in by the radius.
-            let center = outer - rot * Vec2::new(d.x * radius, d.y * radius);
-            // tangency points on the two offset edges meeting at the corner.
-            let from = center + rot * Vec2::new(0.0, d.y * radius);
-            let to = center + rot * Vec2::new(d.x * radius, 0.0);
-            gizmos
-                .short_arc_2d_between(center, from, to, accent_color)
-                .resolution(12);
-            // short straight stubs continuing the arc along each edge.
-            gizmos.line_2d(from, from + rot * Vec2::new(-d.x * tail, 0.0), accent_color);
-            gizmos.line_2d(to, to + rot * Vec2::new(0.0, -d.y * tail), accent_color);
+            // rotation hints: short lines along the offset edges of a phantom rounded
+            // rect, joined by a quarter arc, marking the rotate zone just outside.
+            let rot = rot2(frame.rot);
+            let gap = ROTATE_HINT_GAP * wpp;
+            // shrink the elbow on tiny selections so hints and stubs can't collide.
+            let side = frame.size.x.min(frame.size.y);
+            let radius = (ROTATE_HINT_RADIUS * wpp).min((side * 0.5 - gap).max(1.0));
+            let tail = (ROTATE_HINT_TAIL * wpp).min(side * 0.25);
+            for i in 0..4 {
+                let d = CORNER_DIRS[i];
+                let outer = corner_world(&frame, i) + rot * (d * gap);
+                // rounded-rectangle corner: arc center pulled in by the radius.
+                let center = outer - rot * Vec2::new(d.x * radius, d.y * radius);
+                // tangency points on the two offset edges meeting at the corner.
+                let from = center + rot * Vec2::new(0.0, d.y * radius);
+                let to = center + rot * Vec2::new(d.x * radius, 0.0);
+                gizmos
+                    .short_arc_2d_between(center, from, to, accent_color)
+                    .resolution(12);
+                // short straight stubs continuing the arc along each edge.
+                gizmos.line_2d(from, from + rot * Vec2::new(-d.x * tail, 0.0), accent_color);
+                gizmos.line_2d(to, to + rot * Vec2::new(0.0, -d.y * tail), accent_color);
+            }
         }
     }
 

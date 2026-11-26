@@ -114,6 +114,7 @@ impl Clock {
 
 // stored node state
 
+/// wire row for every node kind. schema changes bump [`SCHEMA_VERSION`].
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct SavedNode {
     pub kind: String,
@@ -136,6 +137,16 @@ pub struct SavedNode {
     pub crop_w: Option<f32>,
     pub crop_h: Option<f32>,
     pub px_scale: Option<f32>,
+}
+
+impl SavedNode {
+    /// lowest project schema that can faithfully read this row.
+    pub fn schema_version(&self) -> u32 {
+        match self.kind.as_str() {
+            "image" | "frame" => 1,
+            _ => SCHEMA_VERSION,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -167,20 +178,70 @@ pub struct Op {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Batch {
-    #[serde(default = "wire_version")]
+    #[serde(default = "default_schema_version")]
     pub v: u32,
     pub device: String,
     pub session: String,
     pub ops: Vec<Op>,
 }
 
-fn wire_version() -> u32 {
-    1
+/// project schema this build can read and write. bump when new persisted data
+/// can't be faithfully handled by older clients.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// old files and caches predate project schema markers.
+const BASE_SCHEMA: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    BASE_SCHEMA
+}
+
+/// reads only the top-level version, so unrecognized envelopes still probe.
+#[derive(Deserialize)]
+struct WireProbe {
+    #[serde(default = "default_schema_version")]
+    v: u32,
+}
+
+pub const SCHEMA_FILE: &str = "schema.json";
+
+#[derive(Serialize, Deserialize)]
+struct SchemaFile {
+    #[serde(default = "default_schema_version")]
+    version: u32,
+}
+
+/// project schema marker; projects from before this file count as v1.
+pub fn read_schema(root: &Path) -> u32 {
+    let path = root.join(SCHEMA_FILE);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return BASE_SCHEMA;
+    };
+    match serde_json::from_slice::<SchemaFile>(&bytes) {
+        Ok(file) => file.version.max(BASE_SCHEMA),
+        Err(err) => {
+            warn!("schema marker unreadable ({}): {err}", path.display());
+            BASE_SCHEMA
+        }
+    }
+}
+
+/// raise the project marker; never lowers it.
+pub fn write_schema(root: &Path, version: u32) -> Result<()> {
+    let version = version.max(BASE_SCHEMA);
+    if read_schema(root) >= version {
+        return Ok(());
+    }
+    let path = root.join(SCHEMA_FILE);
+    let tmp = root.join(format!(".{SCHEMA_FILE}.{:08x}.tmp", nonce()));
+    std::fs::write(&tmp, serde_json::to_vec(&SchemaFile { version })?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Checkpoint {
-    #[serde(default = "wire_version")]
+    #[serde(default = "default_schema_version")]
     v: u32,
     device: String,
     created_ms: u64,
@@ -200,6 +261,14 @@ pub struct MergeState {
     pub nodes: HashMap<NodeId, VersionedNode>,
     #[serde(default)]
     pub seen: HashMap<String, Rev>,
+    /// highest project schema observed on disk.
+    #[serde(default = "default_schema_version")]
+    pub schema: u32,
+    /// project needs a newer schema than this build supports.
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub read_only_v: u32,
 }
 
 impl MergeState {
@@ -333,8 +402,14 @@ impl Journal {
         if ops.is_empty() {
             return Ok(false);
         }
+        let v = ops
+            .iter()
+            .filter_map(|op| op.node.as_ref())
+            .map(SavedNode::schema_version)
+            .max()
+            .unwrap_or(BASE_SCHEMA);
         let batch = Batch {
-            v: wire_version(),
+            v,
             device: self.device.clone(),
             session: self.session.clone(),
             ops,
@@ -417,6 +492,9 @@ fn journal_covered(path: &Path, state: &MergeState) -> bool {
         let Ok(batch) = serde_json::from_slice::<Batch>(&line) else {
             return false;
         };
+        if batch.v > SCHEMA_VERSION {
+            return false;
+        }
         for op in batch.ops {
             match state.nodes.get(&op.id) {
                 Some(node) if node.rev >= op.rev => {}
@@ -525,10 +603,39 @@ fn head_hash(path: &Path) -> std::io::Result<u64> {
 
 /// read new ops from every journal, including conflict copies.
 pub fn read_project(root: &Path, state: &mut MergeState, marks: &mut Marks) -> Result<Vec<Change>> {
+    // a build that understands the newer schema can take the project back.
+    if state.read_only && state.read_only_v != 0 && SCHEMA_VERSION >= state.read_only_v {
+        state.read_only = false;
+        state.read_only_v = 0;
+        marks.clear(); // re-read files skipped while newer
+    }
+    let marker = read_schema(root);
+    if marker > SCHEMA_VERSION {
+        mark_read_only(state, marker, &root.join(SCHEMA_FILE));
+    } else {
+        state.schema = state.schema.max(marker);
+    }
+
     let mut changes = Vec::new();
     read_checkpoints(&root.join("checkpoints"), state, marks, &mut changes)?;
     read_journals(&root.join("journal"), state, marks, &mut changes)?;
+    if std::env::var_os("REFCANVAS_FORCE_READ_ONLY").is_some() {
+        state.read_only = true;
+    }
     Ok(changes)
+}
+
+fn mark_read_only(state: &mut MergeState, v: u32, path: &Path) {
+    let first = !state.read_only || v > state.read_only_v;
+    state.read_only = true;
+    state.read_only_v = state.read_only_v.max(v);
+    state.schema = state.schema.max(v);
+    if first {
+        warn!(
+            "{} requires project schema v{v}; saving disabled until RefCanvas is updated",
+            path.display()
+        );
+    }
 }
 
 fn read_journals(
@@ -601,8 +708,14 @@ fn read_journals(
             if line.is_empty() {
                 continue;
             }
-            match serde_json::from_slice::<Batch>(&line) {
-                Ok(batch) => merge_batch(state, batch, changes),
+            match serde_json::from_slice::<WireProbe>(&line) {
+                Ok(probe) if probe.v > SCHEMA_VERSION => {
+                    mark_read_only(state, probe.v, &path);
+                }
+                Ok(_) => match serde_json::from_slice::<Batch>(&line) {
+                    Ok(batch) => merge_batch(state, batch, changes),
+                    Err(err) => warn!("journal line skipped ({}): {err}", path.display()),
+                },
                 Err(err) => warn!("journal line skipped ({}): {err}", path.display()),
             }
         }
@@ -626,6 +739,7 @@ fn read_journals(
 }
 
 fn merge_batch(state: &mut MergeState, batch: Batch, changes: &mut Vec<Change>) {
+    state.schema = state.schema.max(batch.v);
     for op in batch.ops {
         if state.covered(&op.rev) {
             continue;
@@ -678,11 +792,34 @@ fn read_checkpoints(
             continue;
         }
         let head = head_hash(&path).unwrap_or(0);
-        let parsed = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Checkpoint>(&bytes).ok());
+        let Some(bytes) = std::fs::read(&path).ok() else {
+            marks.remove(&key);
+            continue;
+        };
+        match serde_json::from_slice::<WireProbe>(&bytes) {
+            Ok(probe) if probe.v > SCHEMA_VERSION => {
+                mark_read_only(state, probe.v, &path);
+                marks.insert(
+                    key,
+                    FileMark {
+                        len,
+                        mtime_ns: mtime,
+                        head,
+                    },
+                );
+                continue;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                warn!("checkpoint unreadable ({}), will retry", path.display());
+                marks.remove(&key);
+                continue;
+            }
+        }
+        let parsed = serde_json::from_slice::<Checkpoint>(&bytes).ok();
         match parsed {
             Some(checkpoint) => {
+                state.schema = state.schema.max(checkpoint.v);
                 for (device, rev) in checkpoint.seen {
                     match state.seen.get(&device) {
                         Some(current) if current >= &rev => {}
@@ -727,16 +864,29 @@ fn read_checkpoints(
 
 // checkpoint writer
 
+fn checkpoint_schema(state: &MergeState) -> u32 {
+    state.schema.max(
+        state
+            .nodes
+            .values()
+            .filter_map(|value| value.node.as_ref())
+            .map(SavedNode::schema_version)
+            .max()
+            .unwrap_or(BASE_SCHEMA),
+    )
+}
+
 /// write a full-state checkpoint owned by this device; immutable once written
 /// so replication never has two versions to merge.
 pub fn write_checkpoint(dir: &Path, device: &str, state: &MergeState) -> Result<Option<PathBuf>> {
-    if state.is_empty() {
+    if state.is_empty() || state.read_only {
         return Ok(None);
     }
+    let version = checkpoint_schema(state);
     std::fs::create_dir_all(dir)?;
     let safe = safe_device(device);
     let checkpoint = Checkpoint {
-        v: wire_version(),
+        v: version,
         device: safe.clone(),
         created_ms: now_ms(),
         seen: state.seen.clone(),
@@ -758,6 +908,11 @@ pub fn write_checkpoint(dir: &Path, device: &str, state: &MergeState) -> Result<
             .with_context(|| format!("verifying checkpoint {path:?}"));
     }
     prune_own_checkpoints(dir, &safe, 3);
+    if version > BASE_SCHEMA
+        && let Some(root) = dir.parent()
+    {
+        let _ = write_schema(root, version);
+    }
     Ok(Some(path))
 }
 
@@ -1201,6 +1356,133 @@ mod tests {
     }
 
     #[test]
+    fn old_state_and_batches_default_to_schema_one() {
+        let state: MergeState = serde_json::from_str(r#"{"nodes":{},"seen":{}}"#).unwrap();
+        assert_eq!(state.schema, 1);
+        assert!(!state.read_only);
+        let batch: Batch =
+            serde_json::from_str(r#"{"device":"d","session":"s","ops":[]}"#).unwrap();
+        assert_eq!(batch.v, 1);
+    }
+
+    #[test]
+    fn schema_marker_round_trips_and_never_lowers() {
+        let root = std::env::temp_dir().join(format!(
+            "refcanvas-schema-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(read_schema(&root), 1);
+        write_schema(&root, 2).unwrap();
+        assert_eq!(read_schema(&root), 2);
+        write_schema(&root, 1).unwrap();
+        assert_eq!(read_schema(&root), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn newer_schema_marker_is_read_only_but_still_viewable() {
+        let root = std::env::temp_dir().join(format!(
+            "refcanvas-schema-marker-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let id = Uuid::now_v7();
+        let mut c = clock("dev");
+        {
+            let mut journal = Journal::create(&root.join("journal"), "dev").unwrap();
+            journal
+                .append(vec![Op {
+                    id,
+                    rev: c.tick(),
+                    deleted: false,
+                    node: Some(node(3.0)),
+                }])
+                .unwrap();
+        }
+        write_schema(&root, 2).unwrap();
+
+        let mut state = MergeState::default();
+        let mut marks = Marks::default();
+        let changes = read_project(&root, &mut state, &mut marks).unwrap();
+        assert!(state.read_only);
+        assert_eq!(state.read_only_v, 2);
+        assert_eq!(state.schema, 2);
+        assert_eq!(state.nodes[&id].node.as_ref().unwrap().x, 3.0);
+        assert!(!changes.is_empty());
+        assert!(
+            write_checkpoint(&root.join("checkpoints"), "dev", &state)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            read_project(&root, &mut state, &mut marks)
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn newer_schema_batches_are_skipped() {
+        let root = std::env::temp_dir().join(format!(
+            "refcanvas-schema-batch-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dir = root.join("journal");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old_id = Uuid::now_v7();
+        let new_id = Uuid::now_v7();
+        let mut c = clock("dev");
+        {
+            let mut journal = Journal::create(&dir, "dev").unwrap();
+            journal
+                .append(vec![Op {
+                    id: old_id,
+                    rev: c.tick(),
+                    deleted: false,
+                    node: Some(node(1.0)),
+                }])
+                .unwrap();
+        }
+        let future = Batch {
+            v: 2,
+            device: "future".to_string(),
+            session: "s".to_string(),
+            ops: vec![Op {
+                id: new_id,
+                rev: c.tick(),
+                deleted: false,
+                node: Some(SavedNode {
+                    kind: "text".to_string(),
+                    x: 9.0,
+                    y: 9.0,
+                    w: 10.0,
+                    h: 10.0,
+                    z: 9.0,
+                    ..Default::default()
+                }),
+            }],
+        };
+        std::fs::write(
+            dir.join("zz-future.jsonl"),
+            [serde_json::to_vec(&future).unwrap(), b"\n".to_vec()].concat(),
+        )
+        .unwrap();
+
+        let mut state = MergeState::default();
+        let mut marks = Marks::default();
+        read_project(&root, &mut state, &mut marks).unwrap();
+        assert!(state.read_only);
+        assert_eq!(state.read_only_v, 2);
+        assert!(state.nodes.contains_key(&old_id));
+        assert!(!state.nodes.contains_key(&new_id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn journal_round_trip_ignores_a_partial_tail() {
         let root = std::env::temp_dir().join(format!(
             "refcanvas-oplog-{}-{}",
@@ -1239,7 +1521,7 @@ mod tests {
         // source finishes, complete file replaces the partial copy.
         let second = Uuid::now_v7();
         let batch = Batch {
-            v: wire_version(),
+            v: SCHEMA_VERSION,
             device: "dev".to_string(),
             session: "s".to_string(),
             ops: vec![Op {

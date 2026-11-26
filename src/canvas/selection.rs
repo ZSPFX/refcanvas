@@ -9,7 +9,7 @@ use super::egui_pointer_busy;
 use super::frames::{FrameLabelHits, FrameRename, LABEL_DOUBLE_CLICK};
 use super::hit::{self, HitKind};
 use super::manipulate::{self, RotateDrag, ScaleDrag, ZCounter, current_pose};
-use super::node::{InactiveTab, CanvasNode, NodeKind, NodeSnapshot, Pose, TabOwner};
+use super::node::{CanvasNode, InactiveTab, NodeKind, NodeSnapshot, Pose, TabOwner};
 use super::touch::{Pointer, TOUCH_DRAG_THRESHOLD_PX};
 use super::undo::{UndoEntry, UndoStack, snapshot_of};
 use crate::project::tabs::Tabs;
@@ -283,6 +283,16 @@ pub fn pointer_events(
     mut q: NodeQ,
 ) {
     let egui_busy = egui_pointer_busy(&mut contexts);
+    let read_only = tabs.active_read_only();
+
+    if read_only
+        && !matches!(
+            *interaction,
+            Interaction::Idle | Interaction::Marquee { .. }
+        )
+    {
+        cancel_interaction(&mut interaction, &mut q);
+    }
 
     if pointer.just_released {
         // shift press that never dragged is a shift-click: toggle it back out
@@ -339,7 +349,7 @@ pub fn pointer_events(
             .get(*e)
             .is_some_and(|l| hit::point_inside(cursor_world, l))
     });
-    if !on_selected_label {
+    if !read_only && !on_selected_label {
         if let Some(frame) = selection_frame_of(&q, &selection) {
             let (handle_px, rotate_px) = if pointer.is_touch {
                 hit::touch_radii(&frame, wpp)
@@ -392,7 +402,8 @@ pub fn pointer_events(
     }
 
     // touch double-tap inside the frame drags the whole selection, gaps included
-    let double_tap_selection = pointer.is_touch
+    let double_tap_selection = !read_only
+        && pointer.is_touch
         && pointer.double_tap
         && !on_selected_label
         && !selection.nodes.is_empty()
@@ -416,6 +427,31 @@ pub fn pointer_events(
     };
     let hit = pick_topmost(cursor_world, &q, &keep, &label_hits, slop);
     if let Some((entity, _pose)) = hit {
+        if read_only {
+            if shift {
+                if selection.contains(entity) {
+                    selection.nodes.retain(|n| *n != entity);
+                } else {
+                    selection.nodes.push(entity);
+                }
+            } else if !selection.contains(entity) {
+                selection.nodes = vec![entity];
+            }
+            rename.last_click = None;
+            // keep the click selection, but let a drag become a marquee so
+            // read-only can select from anywhere, including over frames.
+            let base = if shift {
+                selection.nodes.clone()
+            } else {
+                Vec::new()
+            };
+            *interaction = Interaction::Marquee {
+                start_world: cursor_world,
+                current_world: cursor_world,
+                base,
+            };
+            return;
+        }
         // double-click on a label renames the frame; the first click behaves normally
         if press_label(
             entity,
@@ -492,6 +528,14 @@ pub fn apply_interaction(
     q_own: Query<(Entity, &TabOwner), Without<InactiveTab>>,
     mut q: NodeQ,
 ) {
+    if tabs.active_read_only()
+        && !matches!(
+            *interaction,
+            Interaction::Idle | Interaction::Marquee { .. }
+        )
+    {
+        cancel_interaction(&mut interaction, &mut q);
+    }
     let mut promote: Option<(Vec2, Vec<(Entity, NodeSnapshot)>)> = None;
     if let Interaction::PendingMove {
         press_screen,

@@ -1,7 +1,7 @@
 //! per-tab persistence: world loading, preview streaming, journal writes, autosave.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
@@ -148,7 +148,7 @@ pub fn load_into_world(
 
     for (id, saved) in merge.visible_nodes() {
         let saved = normalize_saved(saved.clone());
-        spawn_saved_node(
+        let spawned = spawn_saved_node(
             commands,
             tab_id,
             id,
@@ -158,7 +158,8 @@ pub fn load_into_world(
             &placeholder,
             loader,
             zc,
-        );
+        )
+        .is_some();
         if saved.kind == "image" {
             let abs_path = saved
                 .src
@@ -172,7 +173,11 @@ pub fn load_into_world(
                 }
             }
         }
-        state.saved.insert(id, saved);
+        // only rows we actually loaded may ever be diffed as deleted; newer
+        // kinds and broken rows stay untouched in the merge state.
+        if spawned {
+            state.saved.insert(id, saved);
+        }
         count += 1;
     }
 
@@ -316,12 +321,16 @@ pub fn spawn_saved_node(
 /// the saved baseline.
 pub fn save_nodes(
     tab_id: u64,
+    root: &Path,
     journal: &mut Journal,
     merge: &mut MergeState,
     state: &mut PersistenceState,
     clock: &mut Clock,
     q: &mut Query<(Entity, &Transform, &mut CanvasNode, &Sprite, &TabOwner)>,
 ) -> bool {
+    if merge.read_only {
+        return false;
+    }
     let t0 = Instant::now();
 
     let mut inserts: Vec<(Entity, NodeId, SavedNode)> = Vec::new();
@@ -388,6 +397,18 @@ pub fn save_nodes(
     if let Err(err) = journal.append(ops.clone()) {
         warn!("journal append failed: {err:#}");
         return false;
+    }
+    let required = ops
+        .iter()
+        .filter_map(|op| op.node.as_ref())
+        .map(SavedNode::schema_version)
+        .max()
+        .unwrap_or(1);
+    merge.schema = merge.schema.max(required);
+    if merge.schema > 1
+        && let Err(err) = oplog::write_schema(root, merge.schema)
+    {
+        warn!("schema marker write failed: {err:#}");
     }
     local::save_clock(clock);
     for op in &ops {
@@ -530,6 +551,7 @@ pub fn autosave(
 
     if save_nodes(
         tab.id,
+        &tab.store.root,
         journal,
         &mut tab.merge,
         &mut tab.state,

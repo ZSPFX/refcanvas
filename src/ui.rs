@@ -269,6 +269,16 @@ fn context_menu_input(
     } else {
         selection.clear();
     }
+    if tabs.active_read_only()
+        && !node.is_some_and(|e| {
+            q.get(e)
+                .ok()
+                .is_some_and(|(_, _, _, node)| node.image().is_some())
+        })
+    {
+        menu.open = false;
+        return;
+    }
     menu.open = true;
     menu.pos = cursor;
     menu.node = node;
@@ -550,6 +560,20 @@ fn context_menu_ui(
     if !menu.open {
         return Ok(());
     }
+    let read_only = tabs.active_read_only();
+    if read_only
+        && !menu.node.is_some_and(|e| {
+            q.get(e)
+                .ok()
+                .is_some_and(|(_, _, _, node)| node.image().is_some())
+        })
+    {
+        menu.open = false;
+        menu.reset_open = false;
+        menu.reset_rect = None;
+        menu.reset_menu_rect = None;
+        return Ok(());
+    }
     let ctx = contexts.ctx_mut()?;
     let mut action: Option<MenuAction> = None;
     let mut hits: Vec<(MenuAction, egui::Rect)> = Vec::new();
@@ -573,36 +597,48 @@ fn context_menu_ui(
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
                     if has_node {
-                        let reset = submenu_row(ui, "Reset");
-                        reset_rect = Some(reset.rect);
-                        reset_hover = reset.contains_pointer();
-                        menu_pair(
-                            ui,
-                            &mut hits,
-                            &mut action,
-                            ("Flip H", MenuAction::FlipH),
-                            ("Flip V", MenuAction::FlipV),
-                        );
-                        if !selection.nodes.is_empty() {
-                            let label = format!("Group ({})", format_count(selection.nodes.len()));
-                            if menu_row(ui, &mut hits, &label, Some(MenuAction::Group)) {
-                                action = Some(MenuAction::Group);
+                        if read_only {
+                            if menu_row(
+                                ui,
+                                &mut hits,
+                                "Show in File Manager",
+                                Some(MenuAction::Reveal),
+                            ) {
+                                action = Some(MenuAction::Reveal);
+                            }
+                        } else {
+                            let reset = submenu_row(ui, "Reset");
+                            reset_rect = Some(reset.rect);
+                            reset_hover = reset.contains_pointer();
+                            menu_pair(
+                                ui,
+                                &mut hits,
+                                &mut action,
+                                ("Flip H", MenuAction::FlipH),
+                                ("Flip V", MenuAction::FlipV),
+                            );
+                            if !selection.nodes.is_empty() {
+                                let label =
+                                    format!("Group ({})", format_count(selection.nodes.len()));
+                                if menu_row(ui, &mut hits, &label, Some(MenuAction::Group)) {
+                                    action = Some(MenuAction::Group);
+                                }
+                            }
+                            ui.separator();
+                            if menu_row(
+                                ui,
+                                &mut hits,
+                                "Show in File Manager",
+                                Some(MenuAction::Reveal),
+                            ) {
+                                action = Some(MenuAction::Reveal);
+                            }
+                            ui.separator();
+                            if menu_row(ui, &mut hits, "Delete", Some(MenuAction::Delete)) {
+                                action = Some(MenuAction::Delete);
                             }
                         }
-                        ui.separator();
-                        if menu_row(
-                            ui,
-                            &mut hits,
-                            "Show in File Manager",
-                            Some(MenuAction::Reveal),
-                        ) {
-                            action = Some(MenuAction::Reveal);
-                        }
-                        ui.separator();
-                        if menu_row(ui, &mut hits, "Delete", Some(MenuAction::Delete)) {
-                            action = Some(MenuAction::Delete);
-                        }
-                    } else {
+                    } else if !read_only {
                         if menu_row(
                             ui,
                             &mut hits,
@@ -932,6 +968,10 @@ fn frame_rename_ui(
     let Some(frame) = rename.frame else {
         return Ok(());
     };
+    if tabs.active_read_only() {
+        rename.clear();
+        return Ok(());
+    }
     let ctx = contexts.ctx_mut()?;
 
     // frame can vanish mid-edit (delete, tab close, undo).
@@ -1403,6 +1443,7 @@ fn hud(
     selection: Res<Selection>,
     queue: Res<ImportQueue>,
     update: Res<crate::update::UpdateStatus>,
+    tabs: Res<Tabs>,
     real: Res<Time<Real>>,
     mut pacer: ResMut<crate::FramePacer>,
     mut fps: Local<FpsCounter>,
@@ -1506,6 +1547,38 @@ fn hud(
                 }
                 if let Some((done, total)) = queue.progress() {
                     ui.label(text(format!("importing {done}/{total}")));
+                }
+                if let Some(tab) = tabs.stored.get(tabs.active)
+                    && tab.merge.read_only
+                {
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(190, 38, 38))
+                        .corner_radius(0)
+                        .inner_margin(egui::Margin::symmetric(4, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("(read-only)")
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(egui::Color32::WHITE),
+                            );
+                        });
+
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(80, 20, 20))
+                        .corner_radius(0)
+                        .inner_margin(egui::Margin::symmetric(4, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    "This project data structure is newer than your client; an update is required to prevent data corruption...",
+                                )
+                                .monospace()
+                                .size(12.0)
+                                .color(egui::Color32::WHITE),
+                            );
+                        });
+                    // ui.label(text("update RefCanvas to edit".to_string()).weak());
                 }
             });
         });

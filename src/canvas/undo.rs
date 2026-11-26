@@ -196,6 +196,9 @@ pub fn undo_redo(
     if super::egui_keyboard_busy(&mut contexts) {
         return;
     }
+    if tabs.active_read_only() {
+        return;
+    }
     let command = crate::canvas::command_down(&keys, &chord_mem, chord_frame.0);
     let shift = crate::canvas::shift_down(&keys, &chord_mem, chord_frame.0);
 

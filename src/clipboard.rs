@@ -186,7 +186,15 @@ fn poll_copy(mut sc: ResMut<SystemClipboard>) {
     sc.history.truncate(COPY_HISTORY);
 }
 
-fn poll_paste(mut sc: ResMut<SystemClipboard>, mut queue: ResMut<ImportQueue>) {
+fn poll_paste(
+    mut sc: ResMut<SystemClipboard>,
+    mut queue: ResMut<ImportQueue>,
+    tabs: Res<crate::project::tabs::Tabs>,
+) {
+    if tabs.active_read_only() {
+        sc.paste = None;
+        return;
+    }
     let payload = {
         let Some(task) = sc.paste.as_mut() else {
             return;

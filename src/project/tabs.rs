@@ -69,6 +69,12 @@ impl Tabs {
         self.stored.get(self.active).map(|t| t.id)
     }
 
+    pub fn active_read_only(&self) -> bool {
+        self.stored
+            .get(self.active)
+            .is_some_and(|tab| tab.merge.read_only)
+    }
+
     pub fn index_of(&self, id: u64) -> Option<usize> {
         self.stored.iter().position(|t| t.id == id)
     }
@@ -653,6 +659,7 @@ fn save_active(
     tab.view = (view.center, view.log_scale);
     if persist::save_nodes(
         tab.id,
+        &tab.store.root,
         journal,
         &mut tab.merge,
         &mut tab.state,

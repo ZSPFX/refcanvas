@@ -250,6 +250,11 @@ pub fn load_state(root: &Path) -> Option<CachedState> {
 }
 
 pub fn save_state(root: &Path, merge: &MergeState, files: &HashMap<String, FileMark>) {
+    // don't cache partial state or file marks for a project this build can't
+    // fully read; a newer build must be able to replay everything.
+    if merge.read_only {
+        return;
+    }
     let Some(dir) = project_dir(root) else {
         return;
     };
@@ -266,6 +271,9 @@ pub fn save_state(root: &Path, merge: &MergeState, files: &HashMap<String, FileM
 /// write local state on a worker thread; the journal is already durable, so a
 /// missed or slow cache only costs replay.
 pub fn save_state_async(root: PathBuf, merge: MergeState, files: HashMap<String, FileMark>) {
+    if merge.read_only {
+        return;
+    }
     std::thread::spawn(move || save_state(&root, &merge, &files));
 }
 

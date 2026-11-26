@@ -51,6 +51,20 @@ pub fn has_pending(tabs: &Tabs) -> bool {
         .any(|tab| tab.loaded && !tab.pending.is_empty())
 }
 
+/// write local state for dirty tabs; read-only tabs just clear the flag.
+fn cache_dirty_states(tabs: &mut Tabs) {
+    for tab in &mut tabs.stored {
+        if !tab.state_dirty {
+            continue;
+        }
+        tab.state_dirty = false;
+        if tab.merge.read_only {
+            continue;
+        }
+        local::save_state_async(tab.store.root.clone(), tab.merge.clone(), tab.files.clone());
+    }
+}
+
 pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tabs: ResMut<Tabs>) {
     timer.poll += time.delta_secs();
     if timer.poll < 1.0 {
@@ -97,16 +111,7 @@ pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tab
     timer.cache += 1.0;
     if timer.cache >= 15.0 {
         timer.cache = 0.0;
-        for tab in tabs.stored.iter_mut() {
-            if tab.state_dirty {
-                tab.state_dirty = false;
-                local::save_state_async(
-                    tab.store.root.clone(),
-                    tab.merge.clone(),
-                    tab.files.clone(),
-                );
-            }
-        }
+        cache_dirty_states(&mut tabs);
     }
 
     timer.prune += 1.0;
@@ -128,6 +133,9 @@ pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tab
             // snapshot off the frame thread; the journal is already durable, so
             // a missed checkpoint only costs startup replay.
             tab.checkpoint_dirty = false;
+            if tab.merge.read_only {
+                continue;
+            }
             let dir = tab.store.checkpoint_dir();
             let journal_dir = tab.store.journal_dir();
             let Some(journal) = &tab.journal else {
@@ -169,6 +177,7 @@ pub fn flush_local_before_remote(
         };
         if persist::save_nodes(
             tab.id,
+            &tab.store.root,
             journal,
             &mut tab.merge,
             &mut tab.state,
@@ -289,11 +298,12 @@ pub fn apply_remote_changes(
                 }
             }
 
+            let mut spawned_entity = None;
             if existing.is_none() || spawned {
                 let handle = placeholder
                     .get_or_insert_with(|| images.add(persist::pending_placeholder()))
                     .clone();
-                persist::spawn_saved_node(
+                spawned_entity = persist::spawn_saved_node(
                     &mut commands,
                     tab_id,
                     id,
@@ -308,14 +318,23 @@ pub fn apply_remote_changes(
 
             let baseline = if let Some(entity) = existing.filter(|_| !spawned) {
                 if let Ok((_, tf, node, sprite, _)) = q.get(entity) {
-                    persist::saved_from(tf, node, sprite)
+                    Some(persist::saved_from(tf, node, sprite))
                 } else {
-                    saved
+                    Some(saved)
                 }
+            } else if spawned_entity.is_some() {
+                Some(saved)
             } else {
-                saved
+                None
             };
-            tabs.stored[index].state.saved.insert(id, baseline);
+            match baseline {
+                Some(baseline) => {
+                    tabs.stored[index].state.saved.insert(id, baseline);
+                }
+                None => {
+                    tabs.stored[index].state.saved.remove(&id);
+                }
+            }
             tabs.stored[index].state_dirty = true;
         }
     }

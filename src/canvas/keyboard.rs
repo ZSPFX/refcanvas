@@ -47,6 +47,7 @@ pub fn shortcuts(
     }
 
     let ctrl = crate::canvas::command_down(&keys, &chord_mem, chord_frame.0);
+    let read_only = ctx.tabs.active_read_only();
 
     let focus_selection = keys.just_pressed(KeyCode::KeyF);
     if focus_selection {
@@ -121,7 +122,7 @@ pub fn shortcuts(
         ctx.view.fly_to(center, 0.0);
     }
 
-    if keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace]) {
+    if !read_only && keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace]) {
         let tab_id = ctx.tabs.active_id().unwrap_or(0);
         manipulate::delete_selection_undoable(
             &mut ctx.selection,
@@ -159,7 +160,7 @@ pub fn shortcuts(
             clipboard::copy_selection(&mut ctx.system_clipboard, nodes);
         }
     }
-    if ctrl && keys.just_pressed(KeyCode::KeyD) {
+    if !read_only && ctrl && keys.just_pressed(KeyCode::KeyD) {
         let offset = Vec2::new(24.0, -24.0) * ctx.view.scale() as f32;
         let tab_id = ctx.tabs.active_id().unwrap_or(0);
         let new = manipulate::duplicate_selection(
@@ -177,7 +178,7 @@ pub fn shortcuts(
     }
     // ctrl+v (and ctrl+shift+v, the file-paste fallback for drag-and-drop) reads
     // the system clipboard: an image becomes a node, files get imported.
-    if ctrl && keys.just_pressed(KeyCode::KeyV) {
+    if !read_only && ctrl && keys.just_pressed(KeyCode::KeyV) {
         let at = window
             .cursor_position()
             .and_then(|c| camera.0.viewport_to_world_2d(camera.1, c).ok())
@@ -185,7 +186,7 @@ pub fn shortcuts(
         clipboard::request_paste(&mut ctx.system_clipboard, at);
     }
 
-    if ctrl && keys.just_pressed(KeyCode::KeyG) && !ctx.selection.nodes.is_empty() {
+    if !read_only && ctrl && keys.just_pressed(KeyCode::KeyG) && !ctx.selection.nodes.is_empty() {
         let tab_id = ctx.tabs.active_id().unwrap_or(0);
         frames::group_selection(
             &ctx.selection,

@@ -590,6 +590,157 @@ fn remote_edits_apply_without_echoing_a_local_op() {
 }
 
 #[test]
+fn newer_schema_marker_blocks_writes() {
+    let mut f = Fixture::new();
+    f.request(TabRequest::Switch(0));
+    let entity = f
+        .nodes(0)
+        .into_iter()
+        .find(|entity| {
+            f.app
+                .world()
+                .get::<CanvasNode>(*entity)
+                .unwrap()
+                .image()
+                .is_some()
+        })
+        .unwrap();
+    let store = ProjectStore {
+        root: f.root.join("0"),
+    };
+    let journal_path = f.app.world().resource::<Tabs>().stored[0]
+        .journal
+        .as_ref()
+        .unwrap()
+        .path()
+        .to_path_buf();
+    let before = std::fs::metadata(&journal_path).unwrap().len();
+
+    crate::project::oplog::write_schema(&store.root, 2).unwrap();
+    {
+        let tab = &mut f.app.world_mut().resource_mut::<Tabs>().stored[0];
+        crate::project::oplog::read_project(&store.root, &mut tab.merge, &mut tab.files).unwrap();
+    }
+    assert!(f.app.world().resource::<Tabs>().active_read_only());
+
+    f.app
+        .world_mut()
+        .get_mut::<Transform>(entity)
+        .unwrap()
+        .translation
+        .x += 5.0;
+    f.app
+        .world_mut()
+        .run_system_once(
+            |mut tabs: ResMut<Tabs>,
+             view: Res<View>,
+             mut nodes: Query<(Entity, &Transform, &mut CanvasNode, &Sprite, &TabOwner)>| {
+                save_active(&mut tabs, &view, &mut nodes);
+            },
+        )
+        .unwrap();
+
+    let after = std::fs::metadata(&journal_path).unwrap().len();
+    assert_eq!(before, after, "read-only projects must not append journals");
+    let tab = &f.app.world().resource::<Tabs>().stored[0];
+    assert!(tab.merge.read_only);
+    assert!(
+        crate::project::oplog::write_checkpoint(&store.checkpoint_dir(), "test", &tab.merge)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn newer_schema_batches_are_ignored_live() {
+    let mut f = Fixture::new();
+    f.request(TabRequest::Switch(0));
+    let store = ProjectStore {
+        root: f.root.join("0"),
+    };
+    let text_id = Uuid::now_v7();
+    let mut clock = Clock::new("future-device".to_string(), 100, 0);
+    let batch = crate::project::oplog::Batch {
+        v: 2,
+        device: "future-device".to_string(),
+        session: "s".to_string(),
+        ops: vec![Op {
+            id: text_id,
+            rev: clock.tick(),
+            deleted: false,
+            node: Some(SavedNode {
+                kind: "text".to_string(),
+                x: 10.0,
+                y: 10.0,
+                w: 50.0,
+                h: 20.0,
+                z: 4.0,
+                ..Default::default()
+            }),
+        }],
+    };
+    let mut line = serde_json::to_vec(&batch).unwrap();
+    line.push(b'\n');
+    std::fs::write(store.journal_dir().join("zz-future.jsonl"), line).unwrap();
+
+    {
+        let tab = &mut f.app.world_mut().resource_mut::<Tabs>().stored[0];
+        let changes =
+            crate::project::oplog::read_project(&store.root, &mut tab.merge, &mut tab.files)
+                .unwrap();
+        tab.pending.extend(changes);
+    }
+    f.app.update();
+
+    let tab = &f.app.world().resource::<Tabs>().stored[0];
+    assert!(tab.merge.read_only);
+    assert!(!tab.merge.nodes.contains_key(&text_id));
+    assert!(f.app.world().resource::<Tabs>().active_read_only());
+}
+
+#[test]
+fn existing_projects_stay_on_schema_one() {
+    let mut f = Fixture::new();
+    f.request(TabRequest::Switch(0));
+    let entity = f
+        .nodes(0)
+        .into_iter()
+        .find(|entity| {
+            f.app
+                .world()
+                .get::<CanvasNode>(*entity)
+                .unwrap()
+                .image()
+                .is_some()
+        })
+        .unwrap();
+    f.app
+        .world_mut()
+        .get_mut::<Transform>(entity)
+        .unwrap()
+        .translation
+        .x += 5.0;
+    f.app
+        .world_mut()
+        .run_system_once(
+            |mut tabs: ResMut<Tabs>,
+             view: Res<View>,
+             mut nodes: Query<(Entity, &Transform, &mut CanvasNode, &Sprite, &TabOwner)>| {
+                save_active(&mut tabs, &view, &mut nodes);
+            },
+        )
+        .unwrap();
+
+    let store = ProjectStore {
+        root: f.root.join("0"),
+    };
+    let tab = &f.app.world().resource::<Tabs>().stored[0];
+    assert!(!tab.merge.read_only);
+    assert_eq!(tab.merge.schema, 1);
+    assert!(!store.root.join(crate::project::oplog::SCHEMA_FILE).exists());
+}
+
+#[test]
 fn remote_tombstone_removes_a_live_node() {
     let mut f = Fixture::new();
     f.request(TabRequest::Switch(0));

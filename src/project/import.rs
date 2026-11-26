@@ -1,13 +1,5 @@
-//! Reference image import.
-//!
-//! Sources: OS drag & drop (via `FileDragAndDrop`), Ctrl+I dialog, the system
-//! clipboard paste (Ctrl+V, files or raw image pixels, see `crate::clipboard`),
-//! and context menus. Workflow per file, on worker threads:
-//!
-//! 1. read bytes, hash them (blake3, 16 hex chars)
-//! 2. decode dimensions, copy bytes into `<root>/images/<hash>.<ext>`
-//! 3. build + cache a preview (`<root>/cache/<hash>_512.{png|jpg}`)
-//! 4. hand the decoded preview pixels back for GPU upload
+//! reference image import: drag & drop, Ctrl+I, clipboard and context menus.
+//! workers hash, store originals under `images/`, cache 512px previews, upload pixels.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -27,26 +19,20 @@ use crate::project::tabs::Tabs;
 use super::oplog::MergeState;
 use super::store::ProjectStore;
 
-/// Preview longest edge, pixels. Canonical preview cap: `persist`'s
-/// regenerator and `node`'s pre-load size guess must both match it.
+/// preview longest edge, px; the cap in `persist` and `node` must match.
 const PREVIEW_MAX: u32 = 512;
 /// keep unreferenced media this long before deleting it
 pub const MEDIA_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// Max concurrent import decodes.
 const MAX_IN_FLIGHT: usize = 6;
-/// Max images pulled from one dropped folder (safety valve).
+/// per-folder import cap (safety valve).
 const MAX_FOLDER_FILES: usize = 1000;
-/// Spacing of the auto-arranged drop grid, world units.
+/// drop-grid spacing, world units.
 const DROP_GRID_CELL: f32 = 520.0;
 
-/// Where an import comes from.
 enum ImportSource {
-    /// A file on disk (drag & drop, dialog, clipboard `text/uri-list`, …).
     File(PathBuf),
-    /// Pixels read from the system clipboard: there is no source file, so
-    /// they are encoded as PNG and stored like any other import. `placement`
-    /// is set when the copy came from refcanvas itself and carries the node
-    /// transforms to restore instead of resetting them.
+    /// clipboard pixels: no source file, so encoded as PNG. `placement` is set
+    /// for in-app copies and carries the transform to restore.
     Pixels {
         name: String,
         image: image::RgbaImage,
@@ -54,9 +40,8 @@ enum ImportSource {
     },
 }
 
-/// Placement to restore for a pasted clipboard image. The pixels are the
-/// already-cropped/flattened copy, so only the display transform is kept; the
-/// crop becomes the whole pasted image.
+/// display transform to restore for a pasted image; its pixels are already
+/// cropped and flattened, so there is no crop to keep.
 #[derive(Clone, Copy, Debug)]
 pub struct PastedPlacement {
     pub size: Vec2,
@@ -64,7 +49,7 @@ pub struct PastedPlacement {
 }
 
 impl ImportSource {
-    /// Deterministic ordering within one batch.
+    /// deterministic order within a batch.
     fn sort_key(&self) -> PathBuf {
         match self {
             ImportSource::File(path) => path.clone(),
@@ -81,14 +66,14 @@ pub struct ImportQueue {
     batch_total: usize,
 }
 
-/// Dev helper: `refcanvas --import <folder>` imports a folder on startup.
+/// dev helper: import a folder from `--import <dir>`.
 #[derive(Resource)]
 pub struct StartupImport(pub PathBuf);
 
 struct Incoming {
     index: usize,
     result: anyhow::Result<ImportedImage>,
-    /// Set for clipboard pastes that carry an in-app placement.
+    /// set for in-app clipboard pastes.
     placement: Option<PastedPlacement>,
 }
 
@@ -107,7 +92,7 @@ impl ImportQueue {
         !self.pending.is_empty() || !self.in_flight.is_empty()
     }
 
-    /// (done, total) for the current batch, if any.
+    /// (done, total) for the current batch.
     pub fn progress(&self) -> Option<(usize, usize)> {
         if !self.is_active() || self.batch_total == 0 {
             return None;
@@ -119,8 +104,7 @@ impl ImportQueue {
     }
 }
 
-/// Queue paths for import, arranging multiple images in a grid centered on
-/// `spawn_center` (world space). Folders are scanned for images.
+/// queue files or folders; multiple images land in a grid around `spawn_center`.
 pub fn enqueue_paths(queue: &mut ImportQueue, spawn_center: Vec2, paths: Vec<PathBuf>) {
     let mut sources = Vec::new();
     for p in paths {
@@ -135,11 +119,8 @@ pub fn enqueue_paths(queue: &mut ImportQueue, spawn_center: Vec2, paths: Vec<Pat
     enqueue_sources(queue, spawn_center, sources);
 }
 
-/// Queue pixels pasted from the system clipboard as a single import.
-///
-/// `placement` is the display size and stacking order recorded when the copy
-/// came from refcanvas. Rotation, flips and crop are already baked into the
-/// pasted pixels by the export step, so they must not be applied again.
+/// queue clipboard pixels as one import. `placement` is the display size and
+/// z recorded on copy; rotation, flips and crop are already baked in.
 pub fn enqueue_clipboard_image(
     queue: &mut ImportQueue,
     spawn_center: Vec2,
@@ -161,7 +142,7 @@ fn enqueue_sources(queue: &mut ImportQueue, spawn_center: Vec2, mut sources: Vec
     if sources.is_empty() {
         return;
     }
-    sources.sort_by_cached_key(|s| s.sort_key()); // deterministic batch order
+    sources.sort_by_cached_key(|s| s.sort_key());
     sources.truncate(MAX_FOLDER_FILES);
 
     if !queue.is_active() {
@@ -211,9 +192,7 @@ fn collect_images(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Systems
-// ---------------------------------------------------------------------------
+// systems
 
 pub fn handle_dropped_files(
     mut messages: MessageReader<FileDragAndDrop>,
@@ -239,7 +218,6 @@ pub fn handle_dropped_files(
     enqueue_paths(&mut queue, spawn_center, paths);
 }
 
-/// Dev helper: import a folder given on the command line (`--import <dir>`).
 pub fn startup_import(
     startup: Option<Res<StartupImport>>,
     mut queue: ResMut<ImportQueue>,
@@ -253,7 +231,7 @@ pub fn startup_import(
     commands.remove_resource::<StartupImport>();
 }
 
-/// Ctrl+I: pick files with the native dialog (blocking modal).
+/// Ctrl+I: pick files with the native dialog.
 pub fn dialog_import(
     keys: Res<ButtonInput<KeyCode>>,
     view: Res<View>,
@@ -264,7 +242,7 @@ pub fn dialog_import(
     chord_mem: Res<crate::canvas::ChordMemory>,
     chord_frame: Res<crate::canvas::lod::FrameCounter>,
 ) {
-    // Finished pickers are collected first: the dialog itself never blocks.
+    // finished pickers are collected first; the dialog itself never blocks.
     if !dialog_results.files.is_empty() {
         let paths = std::mem::take(&mut dialog_results.files);
         enqueue_paths(&mut queue, view.center.as_vec2(), paths);
@@ -287,8 +265,7 @@ pub fn pump_import_queue(mut queue: ResMut<ImportQueue>, store: Res<ProjectStore
             break;
         };
         let store = store.clone();
-        // The placement belongs to the decoded pixels: grab it before the
-        // source moves onto the worker.
+        // placement belongs to the decoded pixels, so grab it before the source moves.
         let placement = match &source {
             ImportSource::Pixels { placement, .. } => *placement,
             ImportSource::File(_) => None,
@@ -334,10 +311,8 @@ pub fn collect_imports(
     for incoming in done {
         match incoming.result {
             Ok(imported) => {
-                // A pasted image is already cropped and flattened, so its
-                // stored crop is the whole file. A refcanvas copy restores the
-                // original display size and z; a foreign image lands
-                // axis-aligned on the cursor.
+                // pasted pixels are already cropped/flattened, so crop is the whole
+                // file. in-app copies restore size and z; others land on the cursor.
                 let natural = imported.natural;
                 let crop = ImageData::full_crop(natural);
                 let (pose, px_scale, z) = match incoming.placement {
@@ -424,9 +399,7 @@ fn grid_cell_offset(index: usize, total: usize) -> Vec2 {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Worker
-// ---------------------------------------------------------------------------
+// worker
 
 fn import_one(store: &ProjectStore, source: ImportSource) -> anyhow::Result<ImportedImage> {
     let (bytes, dyn_img, ext, orig_name) = match source {
@@ -445,7 +418,6 @@ fn import_one(store: &ProjectStore, source: ImportSource) -> anyhow::Result<Impo
             (bytes, dyn_img, ext, orig_name)
         }
         ImportSource::Pixels { name, image, .. } => {
-            // Clipboard pixels have no source file: store them as PNG.
             let bytes = encode_png(&image)?;
             (
                 bytes,
@@ -462,9 +434,8 @@ fn import_one(store: &ProjectStore, source: ImportSource) -> anyhow::Result<Impo
     let rel_path = format!("images/{short}.{ext}");
 
     let dest = store.root.join(&rel_path);
-    // Content-addressed, so an existing file with the right length is already
-    // the correct blob. A short file means a previous write was interrupted
-    // (or a partially replicated version); repair it instead of trusting it.
+    // content-addressed: a same-length file is already the blob. a short one is
+    // an interrupted or partial write, so repair it.
     let needs_write = match std::fs::metadata(&dest) {
         Ok(meta) => meta.len() != bytes.len() as u64,
         Err(_) => true,
@@ -492,7 +463,6 @@ fn import_one(store: &ProjectStore, source: ImportSource) -> anyhow::Result<Impo
     })
 }
 
-/// PNG bytes for pixels that have no source file (clipboard paste).
 fn encode_png(image: &image::RgbaImage) -> anyhow::Result<Vec<u8>> {
     use image::ImageEncoder as _;
     let mut bytes = Vec::new();
@@ -505,7 +475,7 @@ fn encode_png(image: &image::RgbaImage) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Write a preview for `hash` into `dir` as PNG (alpha) or JPEG (opaque).
+/// write a preview as PNG when it has alpha, JPEG otherwise.
 pub fn write_preview_cache(dir: &std::path::Path, short: &str, img: &image::DynamicImage) {
     let _ = std::fs::create_dir_all(dir);
     if img.color().has_alpha() {
@@ -520,15 +490,13 @@ pub fn write_preview_cache(dir: &std::path::Path, short: &str, img: &image::Dyna
     }
 }
 
-/// Read a cached preview for `hash` from `dir`, if present.
 pub fn read_preview_cache(dir: &std::path::Path, short: &str) -> Option<image::DynamicImage> {
     for ext in ["png", "jpg"] {
         let path = dir.join(format!("{short}_512.{ext}"));
         if path.exists() {
             match image::open(&path) {
                 Ok(img) => return Some(img),
-                // Present but unreadable (partial copy, truncation, …):
-                // regenerating from the original still works, but say why.
+                // present but unreadable (partial copy): regeneration still works.
                 Err(err) => warn!("preview cache unreadable ({}): {err}", path.display()),
             }
         }

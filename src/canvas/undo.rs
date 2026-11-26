@@ -1,12 +1,5 @@
-//! Undo / redo (Cmd+Z / Cmd+Shift+Z / Cmd+Y on macOS, Ctrl elsewhere).
-//!
-//! The shortcut is matched on the *physical* key position, deliberately
-//! independent of the keyboard layout: the bottom-left key next to X always
-//! undoes, and the top-row key next to T always redoes. On a QWERTZ board those
-//! are labelled Y and Z respectively.
-//!
-//! Entries are snapshots, not diffs: transforms restore exactly, and
-//! add/remove entries carry the node data needed to respawn entities.
+//! physical-key undo/redo, layout-independent: the bottom-left key next to X
+//! undoes, the top-row key next to T redoes. entries are snapshots, not diffs.
 
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
@@ -16,13 +9,11 @@ use super::node::{CanvasNode, ImageData, ImageNode, NodeKind, NodeSnapshot, TabO
 use super::selection::NodeQ;
 use crate::project::tabs::Tabs;
 
-/// What a record restores into.
 pub enum NodeData {
     Image(ImageData),
     Frame { label: String },
 }
 
-/// A node as it exists (or existed) on the canvas.
 pub struct NodeRecord {
     pub entity: Entity,
     pub tab_id: u64,
@@ -31,13 +22,13 @@ pub struct NodeRecord {
 }
 
 pub enum UndoEntry {
-    /// Transform/flip/z changes on live nodes.
+    /// transform/flip/z changes on live nodes
     Changed {
         items: Vec<(Entity, NodeSnapshot, NodeSnapshot)>,
     },
-    /// Nodes were added (present now): undo removes them, redo re-adds.
+    /// present now: undo removes, redo re-adds
     Added { items: Vec<NodeRecord> },
-    /// Nodes were removed (gone now): undo re-adds them, redo removes.
+    /// gone now: undo re-adds, redo removes
     Removed { items: Vec<NodeRecord> },
 }
 
@@ -92,7 +83,7 @@ pub fn apply_snapshot(
     }
 }
 
-/// Respawn a node from a record (used by undo of deletes / redo of adds).
+/// respawn from a record; used by undo of deletes and redo of adds
 fn respawn(
     commands: &mut Commands,
     zc: &mut ZCounter,
@@ -105,7 +96,7 @@ fn respawn(
             commands
                 .spawn((
                     CanvasNode {
-                        node_id: None, // fresh id when a deleted node is re-added
+                        node_id: None, // fresh id on re-add
                         kind: NodeKind::Image(ImageNode {
                             data: data.clone(),
                             full: None,
@@ -122,7 +113,6 @@ fn respawn(
                     Sprite {
                         image: preview,
                         custom_size: Some(record.snap.pose.size),
-                        // Preview tier (see `ImageData::tier_rect_of`).
                         rect: Some(ImageData::tier_rect_of(
                             record.snap.crop,
                             data.natural,
@@ -161,7 +151,7 @@ fn respawn(
             record.snap.z,
         ),
     };
-    // Keep the z counter above everything we restore.
+    // keep z above everything restored
     zc.0 = zc.0.max(record.snap.z);
     entity
 }
@@ -191,11 +181,7 @@ pub fn records_of(
         .collect()
 }
 
-/// Undo/redo: `Z` alone (or Ctrl+Z) undoes; Shift+Z, Ctrl+Shift+Z or Ctrl+Y
-/// redo.
-///
-/// Keys are matched by the *logical* character, so QWERTZ (Z and Y swapped)
-/// undoes with the key labelled Z and redos with the key labelled Y.
+/// undo/redo; keys are physical, so layout doesn't matter
 pub fn undo_redo(
     keys: Res<ButtonInput<KeyCode>>,
     chord_mem: Res<crate::canvas::ChordMemory>,
@@ -213,9 +199,8 @@ pub fn undo_redo(
     let command = crate::canvas::command_down(&keys, &chord_mem, chord_frame.0);
     let shift = crate::canvas::shift_down(&keys, &chord_mem, chord_frame.0);
 
-    // `KeyCode` names the US physical position, so this is layout-independent:
-    // `KeyZ` is the bottom-left key (labelled Y on QWERTZ) and `KeyY` is the
-    // top-row key (labelled Z on QWERTZ).
+    // `KeyCode` is physical position: `KeyZ` is bottom-left (Y on qwertz),
+    // `KeyY` is top-row (Z on qwertz).
     let (undo, redo) = undo_redo_intent(
         keys.just_pressed(KeyCode::KeyZ),
         keys.just_pressed(KeyCode::KeyY),
@@ -239,14 +224,12 @@ pub fn undo_redo(
     }
 }
 
-/// Physical-key mapping: `z` is the bottom-left key next to X, `y` the top-row
-/// key next to T. The modifier is Cmd on macOS, Ctrl elsewhere.
+/// physical mapping: `z` is bottom-left, `y` top-row
 fn undo_redo_intent(z: bool, y: bool, command: bool, shift: bool) -> (bool, bool) {
     (z && !shift, (z && shift) || (command && y))
 }
 
-/// Apply an entry in reverse (`undoing`) or forward direction; returns the
-/// entry to push onto the opposite stack.
+/// apply in reverse or forward, returning the entry for the opposite stack
 fn apply(
     entry: UndoEntry,
     commands: &mut Commands,
@@ -303,8 +286,7 @@ mod tests {
 
     #[test]
     fn undo_uses_the_bottom_left_key_regardless_of_layout() {
-        // Bottom-left physical key (labelled Y on QWERTZ): bare or with the
-        // command modifier, with or without Shift.
+        // bottom-left key (Y on qwertz): bare or command, with/without shift
         assert_eq!(undo_redo_intent(true, false, false, false), (true, false));
         assert_eq!(undo_redo_intent(true, false, true, false), (true, false));
         assert_eq!(undo_redo_intent(true, false, true, true), (false, true));
@@ -312,7 +294,7 @@ mod tests {
 
     #[test]
     fn redo_uses_the_top_row_key_with_the_command_modifier() {
-        // Top-row physical key (labelled Z on QWERTZ) only redoes with Cmd/Ctrl.
+        // top-row key (Z on qwertz) only redoes with command
         assert_eq!(undo_redo_intent(false, true, true, false), (false, true));
         assert_eq!(undo_redo_intent(false, true, false, false), (false, false));
     }

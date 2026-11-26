@@ -1,4 +1,4 @@
-//! Node manipulation: move/scale/rotate math, spawning, clipboard, focus.
+//! node manipulation: move/scale/rotate math, spawning, clipboard, focus.
 
 use bevy::math::DVec2;
 use bevy::prelude::*;
@@ -9,11 +9,10 @@ use super::node::{CanvasNode, ImageData, NodeKind, NodeSnapshot, Pose};
 use super::selection::{NodeQ, Selection};
 use super::snap::{self, SnapGuide};
 
-/// Smallest visible crop extent, in world px. Keeps a Ctrl-crop drag from
-/// collapsing a node to nothing.
+/// smallest crop extent, world px; a ctrl-crop drag can't collapse the node
 const MIN_CROP_WORLD: f32 = 8.0;
 
-/// Monotonic stacking counter. Nodes get `z` from this when raised/spawned.
+/// monotonic stacking counter; `z` comes from here on raise/spawn
 #[derive(Resource)]
 pub struct ZCounter(pub f32);
 
@@ -51,16 +50,14 @@ pub fn set_pose(
     node.rotation = pose.rot;
     if let Some(s) = sprite {
         s.custom_size = Some(pose.size);
-        // Image nodes: keep the sprite's texture rect in sync with the crop
-        // (in the pixel space of the texture tier the sprite shows).
+        // keep the sprite rect in the crop's tier pixel space
         if let Some(img) = node.image() {
             s.rect = Some(img.active_rect());
         }
     }
 }
 
-/// A frame that fits a set of poses: the node's own pose for a single node,
-/// or the axis-aligned bounding box for several.
+/// single node keeps its own pose; several get an axis-aligned box
 pub fn selection_frame(poses: &[Pose]) -> Option<Pose> {
     match poses {
         [] => None,
@@ -116,8 +113,7 @@ pub fn spawn_image_node_with_z(
     flip_y: bool,
 ) -> Entity {
     let preview = data.preview.clone();
-    // Preview tier: scale the crop into the preview texture's pixel space
-    // (see `ImageData::tier_rect_of`).
+    // preview tier: crop scaled into the preview texture's pixels
     let rect = Some(data.tier_rect(false));
     commands
         .spawn((
@@ -159,10 +155,6 @@ pub fn spawn_image_node_with_z(
         .id()
 }
 
-// ---------------------------------------------------------------------------
-// Move
-// ---------------------------------------------------------------------------
-
 pub fn apply_move(
     snapshots: &[(Entity, NodeSnapshot)],
     delta: Vec2,
@@ -190,22 +182,16 @@ pub fn apply_move(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Scale
-// ---------------------------------------------------------------------------
-
 #[derive(Clone)]
 pub struct ScaleDrag {
-    /// Selection frame at drag start.
     pub frame: Pose,
     pub handle: HitKind,
-    /// Anchor (opposite corner/edge, or the center with Alt held).
+    /// opposite corner/edge, or center with alt
     pub anchor: Vec2,
-    /// This drag may crop with Ctrl (a single image node). The mode is read
-    /// live from the keyboard, so Ctrl can be pressed or released mid-drag.
+    /// ctrl-crop allowed (single image); read live, so ctrl can flip mid-drag
     pub crop_eligible: bool,
     pub snapshots: Vec<(Entity, NodeSnapshot)>,
-    /// Live alignment guides while resizing (see [`super::snap`]).
+    /// live resize guides
     pub guide_x: Option<SnapGuide>,
     pub guide_y: Option<SnapGuide>,
 }
@@ -217,8 +203,7 @@ pub fn begin_scale(
     crop_eligible: bool,
     snapshots: Vec<(Entity, NodeSnapshot)>,
 ) -> Option<ScaleDrag> {
-    // Alt (resize from the center) only applies to plain resizes; a crop
-    // always anchors the opposite edge. Callers fold that into `from_center`.
+    // callers fold alt into `from_center`; a crop always anchors the opposite edge
     let anchor = if from_center {
         frame.center
     } else {
@@ -239,9 +224,8 @@ pub fn begin_scale(
     })
 }
 
-/// Free (or aspect-locked) scale from a handle drag. Multi-selections are
-/// forced uniform so rotated children never skew. Moving edges/centers snap
-/// to nearby nodes (`candidates`) like a move does, with the same guides.
+/// free/aspect-locked scale from a handle drag; multi-selections stay uniform
+/// so rotated children can't skew. moving features snap like a move.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_scale(
     drag: &mut ScaleDrag,
@@ -257,9 +241,7 @@ pub fn apply_scale(
     drag.guide_y = None;
 
     let frame = drag.frame;
-    // Alt resizes around the box centre; otherwise around the anchor picked
-    // at press (the opposite corner/edge). The pivot decides BOTH the factor
-    // math and where the transform is applied, so they can't disagree.
+    // one pivot drives both the factor math and the transform, so they can't disagree
     let pivot = if from_center {
         frame.center
     } else {
@@ -293,27 +275,24 @@ pub fn apply_scale(
         _ => return,
     }
 
-    // Multi-selections scale uniformly; single nodes may resize freely
-    // (images still never stretch; see the cover math below).
+    // multi-selection is uniform; images never stretch (cover math below)
     let force_uniform = uniform || drag.snapshots.len() > 1;
     if force_uniform {
         let s = sx.max(sy);
         sx = s;
         sy = s;
     }
-    // Stay above the minimum size, and don't invert (for now).
+    // clamp to min size; no inversion yet
     let min_sx = min_world / frame.size.x.max(1e-3);
     let min_sy = min_world / frame.size.y.max(1e-3);
     sx = sx.max(min_sx).max(0.001);
     sy = sy.max(min_sy).max(0.001);
 
-    // Snap the moving edges/centers to nearby nodes. Axis-aligned frames
-    // only: on a rotated frame the scaled features are not the box's world
-    // edges, and the world-axis guides/ticks wouldn't line up.
+    // axis-aligned frames only: on rotated frames the world-axis guides don't line up
     if frame.rot == 0.0 && !candidates.is_empty() {
         let box_min = frame.center - frame.size * 0.5;
         let box_max = frame.center + frame.size * 0.5;
-        // Feature position after scaling `f0` (unscaled) around the pivot.
+        // scaled position of a feature around the pivot
         let line = |f0: f32, s: f32, a: f32| a + (f0 - a) * s;
         let movers = |f0_min: f32, f0_mid: f32, f0_max: f32, s: f32, a: f32| {
             [
@@ -349,8 +328,7 @@ pub fn apply_scale(
         let mut line_x = None;
         let mut line_y = None;
         if force_uniform {
-            // A uniform scale can honour only one axis adjustment: take the
-            // closer of the two (ties go to x).
+            // uniform scale honours one axis snap: take the closer, ties to x
             let chosen = match (snap_x, snap_y) {
                 (Some(x), Some(y)) if y.dist < x.dist => Some((false, y)),
                 (Some(x), _) => Some((true, x)),
@@ -377,7 +355,7 @@ pub fn apply_scale(
             }
         }
 
-        // Guides span the boxes as they end up after both adjustments.
+        // span the final boxes after both adjustments
         let fmin = Vec2::new(line(box_min.x, sx, pivot.x), line(box_min.y, sy, pivot.y));
         let fmax = Vec2::new(line(box_max.x, sx, pivot.x), line(box_max.y, sy, pivot.y));
         let eps = snap::line_eps(threshold);
@@ -440,7 +418,7 @@ fn apply_scale_factors(
         let new_center = anchor + rot2(frame_rot) * scaled;
         let new_size = Vec2::new((p0.size.x * sx).max(1.0), (p0.size.y * sy).max(1.0));
 
-        // images use cover: resize from the visible crop so it doesn't reset
+        // cover resize from the visible crop, so the crop isn't reset
         let size = if let Some(img) = node.image_mut() {
             let (crop, px) = image_cover_resize(snap.crop, snap.px_scale, new_size);
             img.data.crop = crop;
@@ -459,16 +437,15 @@ fn apply_scale_factors(
     }
 }
 
-/// Ctrl + handle drag: precise crop. The dragged edge(s) move through the
-/// texture, clamped to the image; the opposite edge stays exactly anchored and
-/// the picture never rescales. Requires a single image node.
+/// ctrl + handle drag: precise crop, dragged edge clamped to the texture,
+/// opposite edge anchored, picture never rescales. single image node only.
 pub fn apply_crop(
     drag: &mut ScaleDrag,
     cursor_world: Vec2,
     wpp: f32,
     q: &mut NodeQ,
 ) {
-    // Cropping is edge-precise by nature; no snapping guides here.
+    // no snapping guides: cropping is edge-precise
     drag.guide_x = None;
     drag.guide_y = None;
 
@@ -476,13 +453,11 @@ pub fn apply_crop(
     let local = rot2(-frame.rot) * (cursor_world - frame.center);
     let half = frame.size * 0.5;
 
-    // Which edges are being dragged (0 = not).
     let dir = match drag.handle {
         HitKind::Corner(i) => CORNER_DIRS[i],
         HitKind::Edge(i) => EDGE_DIRS[i],
         _ => return,
     };
-    // Displacement of the dragged edge(s) in frame-local axes.
     let e = local - Vec2::new(dir.x * half.x, dir.y * half.y);
 
     for (entity, snap) in &drag.snapshots {
@@ -490,20 +465,18 @@ pub fn apply_crop(
             continue;
         };
         let Some(img) = node.image_mut() else {
-            continue; // only image nodes crop
+            continue;
         };
         let px = snap.px_scale;
         let natural = img.data.natural.as_vec2().max(Vec2::ONE);
-        // IMPORTANT: always compute from the crop at drag start (snapshot),
-        // never the live crop, otherwise the drag compounds every frame.
+        // always compute from the press-time crop, or the drag compounds every frame
         let start = snap.crop;
         let min_texels = (MIN_CROP_WORLD * wpp / px.max(1e-6)).max(1.0).min(64.0);
 
         let mut new_min = start.min;
         let mut new_max = start.max;
 
-        // Left / right (texture x). Bounds are pre-clamped so an unusually
-        // small crop (or huge zoom-out) can never produce min > max.
+        // texture x; bounds pre-clamped so a tiny crop can never produce min > max
         let max_left = (start.max.x - min_texels).max(0.0);
         let min_right = (start.min.x + min_texels).min(natural.x);
         if dir.x < 0.0 {
@@ -511,11 +484,11 @@ pub fn apply_crop(
         } else if dir.x > 0.0 {
             new_max.x = (start.max.x + e.x / px).clamp(min_right, natural.x);
         }
-        // Top / bottom (texture y is flipped vs world y).
+        // texture y is flipped vs world y
         let max_top = (start.max.y - min_texels).max(0.0);
         let min_bottom = (start.min.y + min_texels).min(natural.y);
         if dir.y > 0.0 {
-            // world top edge: reveals content with smaller texture y
+            // top edge reveals smaller texture y
             new_min.y = (start.min.y - e.y / px).clamp(0.0, max_top);
         } else if dir.y < 0.0 {
             new_max.y = (start.max.y - e.y / px).clamp(min_bottom, natural.y);
@@ -523,8 +496,7 @@ pub fn apply_crop(
 
         img.data.crop = Rect::from_corners(new_min, new_max);
 
-        // Recompute size/center from the actual (clamped) crop so the
-        // anchored edge stays exactly put.
+        // recompute from the clamped crop so the anchored edge stays put
         let new_size = Vec2::new(
             (new_max.x - new_min.x) * px,
             (new_max.y - new_min.y) * px,
@@ -548,10 +520,6 @@ pub fn apply_crop(
         set_pose(&mut tf, Some(&mut sprite), &mut node, &pose);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Rotate
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct RotateDrag {
@@ -602,10 +570,6 @@ fn snap_angle(a: f32) -> f32 {
     let step = std::f32::consts::PI / 12.0; // 15 degrees
     (a / step).round() * step
 }
-
-// ---------------------------------------------------------------------------
-// Selection helpers
-// ---------------------------------------------------------------------------
 
 pub fn raise(entity: Entity, q: &mut NodeQ, zc: &mut ZCounter) {
     if let Ok((_, mut tf, _, _)) = q.get_mut(entity) {
@@ -675,31 +639,21 @@ pub fn duplicate_selection(
     out
 }
 
-// ---------------------------------------------------------------------------
-// Focus (F / A)
-// ---------------------------------------------------------------------------
-
-/// Extra space left around the focused content, as a multiple of its size.
-/// The same rule applies whether one image or the whole project is framed, so
-/// the gap to the viewport edge is always identical (≈8% on the fitting axis).
-/// Deliberately a constant: the fit must not depend on the current zoom.
+/// extra padding around focused content, × its size; constant so the fit never
+/// depends on the current zoom (≈8% gap on the fitting axis).
 const FOCUS_MARGIN: f32 = 1.2;
 
-/// Arrow-key hops frame the target with extra breathing room (≈2.5× its
-/// size), so the neighbours you're likely to hop to next stay on screen.
+/// arrow hops use extra room (≈2.5× the target) so neighbours stay on screen;
 /// `F` keeps the tight [`FOCUS_MARGIN`] framing.
 pub const ARROW_FOCUS_MARGIN: f32 = 2.5;
 
-/// Frame the given poses. May zoom in well past 100% (`F`).
-///
-/// The zoom comes from the content size and the viewport only, a constant
-/// margin, so it never depends on the current zoom level.
+/// frame the poses; may zoom well past 100% (`F`). zoom comes from content size
+/// and viewport alone, never the current zoom.
 pub fn focus_poses(poses: &[Pose], viewport_logical: Vec2, view: &mut View) {
     focus_poses_with_margin(poses, viewport_logical, view, FOCUS_MARGIN);
 }
 
-/// [`focus_poses`] with a custom content-size multiplier (`margin`), used by
-/// arrow-key navigation to leave more context around the target.
+/// [`focus_poses`] with a custom margin, for arrow hops
 pub fn focus_poses_with_margin(
     poses: &[Pose],
     viewport_logical: Vec2,
@@ -709,16 +663,15 @@ pub fn focus_poses_with_margin(
     let Some(frame) = selection_frame(poses) else {
         return;
     };
-    // Fit the rotated bounds, so a single rotated image can't overflow.
+    // fit the rotated bounds so a rotated image can't overflow
     let fit = aabb_of(&frame);
     let needed = fit.size().max(Vec2::splat(1.0)) * margin;
-    // World units per logical pixel the view should end up with.
+    // target world units per logical pixel
     let want = (needed.x / viewport_logical.x.max(1.0))
         .max(needed.y / viewport_logical.y.max(1.0))
         .max(1e-6) as f64;
-    // `log_scale` is the natural log of world-units-per-logical-pixel (Bevy
-    // sizes the orthographic projection from the logical viewport), so the fit
-    // is exact, not a log-base guess.
+    // log_scale is ln(world units per logical px); the ortho projection is sized
+    // from the logical viewport, so the fit is exact.
     let log_new = want.ln();
     view.fly_to(
         DVec2::new(fit.center().x as f64, fit.center().y as f64),
@@ -759,7 +712,6 @@ mod tests {
             new_crop,
             crop(Vec2::new(100.0, 175.0), Vec2::new(300.0, 225.0))
         );
-        // stays inside the original crop
         assert!(new_crop.min.cmpge(start.min).all());
         assert!(new_crop.max.cmple(start.max).all());
     }

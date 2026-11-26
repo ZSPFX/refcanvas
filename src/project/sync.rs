@@ -1,9 +1,5 @@
-//! Background reconciliation with the shared project folder.
-//!
-//! Polling is deliberate: replicated folders and network shares do not provide
-//! reliable local change notifications, and the projection is cheap because
-//! each file is read incrementally. All merged state stays local; nothing is
-//! written back to a file that another machine may have produced.
+//! background reconciliation with the shared project folder. polling is deliberate:
+//! replicated folders have no reliable change notifications; merged state stays local.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -31,9 +27,8 @@ pub struct SyncTimer {
     prune: f32,
 }
 
-/// Results of background folder-existence probes. A dead network share can
-/// block a filesystem call for a long time, so the main thread never waits on
-/// one.
+/// background folder-existence probes: a dead network share can block a
+/// filesystem call, so the main thread never waits.
 #[derive(Resource)]
 pub struct PathProbe {
     ready: Arc<Mutex<Vec<(PathBuf, bool)>>>,
@@ -49,8 +44,7 @@ impl Default for PathProbe {
     }
 }
 
-/// True while remote changes are waiting to be applied. Used by the idle
-/// throttle so the app keeps stepping while reconciliation is in progress.
+/// remote changes waiting; keeps the idle throttle stepping during reconciliation.
 pub fn has_pending(tabs: &Tabs) -> bool {
     tabs.stored
         .iter()
@@ -69,9 +63,8 @@ pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tab
         match oplog::read_project(&tab.store.root, &mut tab.merge, &mut tab.files) {
             Ok(changes) => {
                 if !changes.is_empty() {
-                    // An unloaded tab will replay the merged state when it is
-                    // first activated; queueing live changes for it would keep
-                    // the idle loop busy for no visible effect.
+                    // unloaded tabs replay merged state on activation; queueing
+                    // live changes would keep the idle loop busy for nothing.
                     if tab.loaded {
                         tab.pending.extend(changes);
                     }
@@ -129,9 +122,8 @@ pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tab
             if !tab.checkpoint_dirty {
                 continue;
             }
-            // Snapshotting a large board is better done off the frame thread;
-            // the journal is already durable, so a missed checkpoint only
-            // costs startup replay time.
+            // snapshot off the frame thread; the journal is already durable, so
+            // a missed checkpoint only costs startup replay.
             tab.checkpoint_dirty = false;
             let dir = tab.store.checkpoint_dir();
             let journal_dir = tab.store.journal_dir();
@@ -149,9 +141,8 @@ pub fn poll_project_files(time: Res<Time>, mut timer: ResMut<SyncTimer>, mut tab
     }
 }
 
-/// Flush local scene changes before resolving queued remote edits. A gesture
-/// can finish before the next autosave; without this, a remote revision that
-/// was queued earlier could overwrite work that just happened locally.
+/// flush local edits before queued remote ones: a gesture can finish before the
+/// next autosave, and the older remote rev must not clobber it.
 pub fn flush_local_before_remote(
     mut tabs: ResMut<Tabs>,
     interaction: Res<Interaction>,
@@ -181,7 +172,6 @@ pub fn flush_local_before_remote(
     }
 }
 
-/// Apply merged remote changes to the live scene.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_remote_changes(
     mut commands: Commands,
@@ -200,8 +190,7 @@ pub fn apply_remote_changes(
     )>,
     mut labels: Query<(&FrameLabel, &mut Text2d)>,
 ) {
-    // Do not yank a node out from under a gesture in progress; changes stay
-    // queued and are applied as soon as the pointer is idle again.
+    // don't yank a node mid-gesture: keep changes queued until the pointer is idle.
     if !interaction.is_idle() {
         return;
     }
@@ -217,10 +206,8 @@ pub fn apply_remote_changes(
         let visible = active == Some(tab_id);
         let store = tabs.stored[index].store.clone();
 
-        // Several queued ops may touch the same node; resolve each id to its
-        // final merged value before touching the scene. This also avoids
-        // double spawns when a node's kind changes, because entity commands are
-        // deferred until the end of the system.
+        // several ops may touch one node; resolve each id to its final merged
+        // value first, which also avoids double spawns when kind changes.
         let mut ids = Vec::new();
         let mut touched = HashSet::new();
         for change in changes {
@@ -446,8 +433,8 @@ pub fn retry_unavailable(
     }
 }
 
-/// Local state for a folder that is gone is dropped only after a long grace
-/// period, so an unmounted drive or an offline share does not lose the camera.
+/// drop local state for a gone folder only after a long grace, so an unmounted
+/// drive keeps its camera.
 pub fn prune_local_state() {
     std::thread::spawn(|| {
         local::sweep_missing(Duration::from_secs(30 * 24 * 60 * 60));

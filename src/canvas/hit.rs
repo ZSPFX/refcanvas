@@ -1,4 +1,4 @@
-//! Hit-testing for nodes and selection handles (pure math, screen-space aware).
+//! hit-testing for nodes and selection handles (pure math, screen-space aware).
 
 use bevy::prelude::*;
 
@@ -6,26 +6,26 @@ use super::node::Pose;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitKind {
-    /// Scale handle at corner `i` (0=TL, 1=TR, 2=BR, 3=BL in local space).
+    /// scale handle at corner `i` (0=TL, 1=TR, 2=BR, 3=BL in local space).
     Corner(usize),
-    /// Scale handle at edge `i` (0=top, 1=right, 2=bottom, 3=left).
+    /// scale handle at edge `i` (0=top, 1=right, 2=bottom, 3=left).
     Edge(usize),
-    /// Rotation zone just outside a corner.
+    /// rotation zone just outside a corner.
     Rotate,
 }
 
-/// Handle hit radius, logical pixels.
+/// handle hit radius, logical px.
 pub const HANDLE_HIT_PX: f32 = 9.0;
-/// Rotation zone radius beyond a corner, logical pixels.
+/// rotation zone radius beyond a corner, logical px.
 pub const ROTATE_ZONE_PX: f32 = 26.0;
-/// Touch handles need a much larger target than a mouse cursor.
+/// touch targets need a much larger radius than a mouse cursor.
 pub const TOUCH_HANDLE_HIT_PX: f32 = 22.0;
-/// Rotation zone for touch, logical pixels.
+/// rotation zone for touch, logical px.
 pub const TOUCH_ROTATE_ZONE_PX: f32 = 36.0;
-/// Finger slop around a node when picking, logical pixels.
+/// finger slop around a node when picking, logical px.
 pub const TOUCH_NODE_SLOP_PX: f32 = 8.0;
 
-/// Corner directions in local space (y up): TL, TR, BR, BL.
+/// corner directions, local space (y up): TL, TR, BR, BL.
 pub const CORNER_DIRS: [Vec2; 4] = [
     Vec2::new(-1.0, 1.0),
     Vec2::new(1.0, 1.0),
@@ -33,7 +33,7 @@ pub const CORNER_DIRS: [Vec2; 4] = [
     Vec2::new(-1.0, -1.0),
 ];
 
-/// Edge outward directions: top, right, bottom, left.
+/// edge outward directions: top, right, bottom, left.
 pub const EDGE_DIRS: [Vec2; 4] = [
     Vec2::new(0.0, 1.0),
     Vec2::new(1.0, 0.0),
@@ -55,7 +55,7 @@ pub fn edge_world(pose: &Pose, i: usize) -> Vec2 {
     pose.center + rot2(pose.rot) * (d * pose.size * 0.5)
 }
 
-/// Is `world` inside the (possibly rotated) node?
+/// is `world` inside the (possibly rotated) node?
 pub fn point_inside(world: Vec2, pose: &Pose) -> bool {
     point_inside_with_slop(world, pose, 0.0)
 }
@@ -66,21 +66,21 @@ pub fn point_inside_with_slop(world: Vec2, pose: &Pose, slop: f32) -> bool {
     local.x.abs() <= pose.size.x * 0.5 + slop && local.y.abs() <= pose.size.y * 0.5 + slop
 }
 
-/// Hit test the handles / rotation zones of a selection frame.
-/// `wpp` is world units per logical pixel.
+/// hit test the handles / rotation zones of a selection frame; `wpp` is world
+/// units per logical px.
 pub fn hit_frame(world: Vec2, frame: &Pose, wpp: f32) -> Option<HitKind> {
     hit_frame_with_radii(world, frame, wpp, HANDLE_HIT_PX, ROTATE_ZONE_PX)
 }
 
-/// Touch radii for `frame`, logical pixels. The enlarged touch target shrinks
-/// on small frames so it cannot swallow the whole node body.
+/// touch radii for `frame`, logical px; the enlarged target shrinks on small
+/// frames so it can't swallow the node body.
 pub fn touch_radii(frame: &Pose, wpp: f32) -> (f32, f32) {
     let min_dim = (frame.size.min_element() / wpp.max(1e-6)).max(1.0);
     let handle = TOUCH_HANDLE_HIT_PX.min(min_dim * 0.28).max(6.0);
     (handle, TOUCH_ROTATE_ZONE_PX.min(handle + 14.0))
 }
 
-/// [`hit_frame`] with explicit handle and rotation radii, logical pixels.
+/// [`hit_frame`] with explicit handle and rotation radii, logical px.
 pub fn hit_frame_with_radii(
     world: Vec2,
     frame: &Pose,
@@ -107,7 +107,7 @@ pub fn hit_frame_with_radii(
         return best.map(|(_, k)| k);
     }
 
-    // Rotation: just outside a corner.
+    // rotation: just outside a corner.
     if !point_inside(world, frame) {
         for i in 0..4 {
             if world.distance(corner_world(frame, i)) <= rotate_r {
@@ -118,7 +118,7 @@ pub fn hit_frame_with_radii(
     None
 }
 
-/// Rectangles (min, max) in world space for a rotated node.
+/// rects (min, max) in world space for a rotated node.
 pub fn aabb_of(pose: &Pose) -> Rect {
     let mut min = Vec2::splat(f32::INFINITY);
     let mut max = Vec2::splat(f32::NEG_INFINITY);
@@ -134,12 +134,7 @@ pub fn rects_overlap(a: Rect, b: Rect) -> bool {
     a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y
 }
 
-/// Does the axis-aligned `rect` overlap a (possibly rotated) node pose?
-///
-/// Separating-axis test on the rect's axes and the node's local axes. Unlike
-/// `rects_overlap` against [`aabb_of`], the corner "gaps" between a rotated
-/// node and its bounding box are not part of the node, marquee selection
-/// uses this so those gaps don't count as selection area.
+/// sat test against a rotated node; unlike aabb overlap, corner gaps don't select.
 pub fn rect_overlaps_pose(rect: Rect, pose: &Pose) -> bool {
     let node = [
         corner_world(pose, 0),

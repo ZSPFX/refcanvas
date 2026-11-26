@@ -1,5 +1,4 @@
-//! Per-tab persistence: loading merged state into the ECS, streaming preview
-//! textures, writing local edits to the operation journal, and autosaving.
+//! per-tab persistence: world loading, preview streaming, journal writes, autosave.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -23,7 +22,7 @@ use super::oplog::{self, Clock, Journal, MergeState, NodeId, Op, SavedNode};
 use super::store::ProjectStore;
 use super::tabs::Tabs;
 
-/// Per-project save bookkeeping (last-known state of every node).
+/// last-known saved state per node.
 #[derive(Default)]
 pub struct PersistenceState {
     pub saved: HashMap<NodeId, SavedNode>,
@@ -34,15 +33,13 @@ pub struct PersistenceState {
 pub struct PreviewLoader {
     queues: HashMap<u64, VecDeque<PreviewJob>>,
     in_flight: Vec<(PreviewJob, Task<Regen>)>,
-    /// Failed decodes whose source file has not arrived yet. Delayed so a
-    /// missing file does not spin every frame.
+    /// failed decodes whose source has not arrived; delayed so a miss does not spin.
     retry: Vec<(Instant, PreviewJob)>,
     active: Option<u64>,
 }
 
 impl PreviewLoader {
-    /// True while previews are still queued or regenerating. The idle throttle
-    /// keeps the loop at full speed until this drains.
+    /// previews queued or regenerating; idle throttle stays busy until this drains.
     pub fn is_active(&self) -> bool {
         !self.in_flight.is_empty()
             || self
@@ -57,7 +54,7 @@ impl PreviewLoader {
         }
         if let Some(previous) = self.active {
             let queue = self.queues.entry(previous).or_default();
-            // Dropping tasks cancels queued work; a running decode may finish once.
+            // dropping the task cancels queued work; a running decode may finish once.
             for (job, _task) in self.in_flight.drain(..) {
                 queue.push_front(job);
             }
@@ -118,25 +115,21 @@ struct Regen {
 }
 
 const AUTOSAVE_INTERVAL: f32 = 1.5;
-/// Cap on preview decodes in flight at once.
 const MAX_PREVIEW_IN_FLIGHT: usize = 32;
-/// Preview longest edge, pixels. The regenerator here and the pre-load size
-/// guess in `node.rs` must both match `import::PREVIEW_MAX`.
+/// preview longest edge, px; must match `import::PREVIEW_MAX` and `node`'s guess.
 pub const PREVIEW_MAX: u32 = 512;
-/// Retry delay for a preview whose source file has not arrived yet.
+/// preview retry backoff bounds, seconds.
 const PREVIEW_RETRY_MIN: u64 = 2;
 const PREVIEW_RETRY_MAX: u64 = 30;
 
-/// Solid dark-gray texture bound to restored nodes whose preview hasn't loaded
-/// yet: the node reads as a dim card instead of an invisible sprite.
+/// dark-gray placeholder so a restored node reads as a card, not an invisible sprite.
 pub(crate) fn pending_placeholder() -> Image {
     to_bevy_image(image::DynamicImage::ImageRgba8(
         image::RgbaImage::from_pixel(1, 1, image::Rgba([0x33, 0x33, 0x33, 0xFF])),
     ))
 }
 
-/// Load a project's merged nodes into the world (hidden when `visible` is
-/// false). Returns the number of nodes spawned.
+/// spawn a project's merged nodes (hidden when `visible` is false).
 #[allow(clippy::too_many_arguments)]
 pub fn load_into_world(
     store: &ProjectStore,
@@ -193,7 +186,7 @@ pub fn load_into_world(
     Ok(count)
 }
 
-/// Spawn one node from stored state and queue its preview if needed.
+/// spawn one stored node and queue its preview.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_saved_node(
     commands: &mut Commands,
@@ -319,8 +312,8 @@ pub fn spawn_saved_node(
     Some(entity)
 }
 
-/// Save all nodes belonging to `tab_id` (insert / update / delete) as one
-/// journal batch, then update the merge state and local bookkeeping.
+/// diff `tab_id`'s nodes into one journal batch, then update merge state and
+/// the saved baseline.
 pub fn save_nodes(
     tab_id: u64,
     journal: &mut Journal,
@@ -421,9 +414,8 @@ pub fn save_nodes(
     true
 }
 
-/// Fill in defaults that the scene derives on spawn, so the saved baseline
-/// matches what the ECS will report on the next diff. Missing crop/scale fields
-/// come from older rows and must not look like a local edit.
+/// fill defaults the scene derives on spawn so the saved baseline matches the
+/// next diff; missing older fields must not look like a local edit.
 pub(crate) fn normalize_saved(mut saved: SavedNode) -> SavedNode {
     if saved.kind == "frame" {
         if saved.label.is_none() {
@@ -509,7 +501,7 @@ pub(crate) fn saved_from(tf: &Transform, node: &CanvasNode, sprite: &Sprite) -> 
     }
 }
 
-/// Periodic autosave of the active tab plus a throttled local camera write.
+/// autosave the active tab and camera.
 pub fn autosave(
     time: Res<Time>,
     mut tabs: ResMut<Tabs>,
@@ -547,9 +539,7 @@ pub fn autosave(
     local::save_view(&tab.store.root, view.center, view.log_scale);
 }
 
-/// Stream preview textures in. Decoding runs on the async compute pool so a big
-/// project loads across every core; the main thread only uploads finished
-/// images and binds them.
+/// stream preview textures: decodes run on the compute pool, the main thread only uploads.
 pub fn pump_preview_loads(
     mut loader: ResMut<PreviewLoader>,
     mut images: ResMut<Assets<Image>>,
@@ -557,7 +547,6 @@ pub fn pump_preview_loads(
     frame: Res<FrameCounter>,
     mut q: Query<(&mut CanvasNode, &mut Sprite), Without<crate::canvas::node::InactiveTab>>,
 ) {
-    // Move due retries back into the queue.
     let now = Instant::now();
     let mut i = 0;
     while i < loader.retry.len() {
@@ -571,7 +560,6 @@ pub fn pump_preview_loads(
         }
     }
 
-    // Completed decodes.
     let mut i = 0;
     while i < loader.in_flight.len() {
         if let Some(regen) = check_ready(&mut loader.in_flight[i].1) {
@@ -596,11 +584,8 @@ pub fn pump_preview_loads(
                     }
                 }
                 None => {
-                    // A missing source file usually means the blob is still on
-                    // its way from another machine. Retry with a backoff. A
-                    // file that exists but cannot be decoded may also be a
-                    // partially replicated version, so give it a few attempts
-                    // before treating it as permanently bad.
+                    // missing source usually means the blob is still replicating, so
+                    // retry with backoff; unreadable-but-present files get a few tries too.
                     let exists = regen.image_path.exists();
                     let give_up = exists && regen.attempts >= 4;
                     if give_up {
@@ -719,7 +704,7 @@ pub fn pump_preview_loads(
     }
 }
 
-/// Persist local merged state and a checkpoint for this device on exit.
+/// persist local cache, camera and checkpoint on exit.
 pub fn save_on_exit(tab: &super::tabs::OpenTab, device: &str) {
     local::save_state(&tab.store.root, &tab.merge, &tab.files);
     local::save_view(&tab.store.root, tab.view.0, tab.view.1);

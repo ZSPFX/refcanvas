@@ -1,4 +1,4 @@
-//! Hover feedback: transform handles change the mouse cursor shape.
+//! hover feedback: transform handles change the mouse cursor shape.
 
 use bevy::prelude::*;
 use bevy::window::{CursorIcon, PrimaryWindow, SystemCursorIcon};
@@ -9,8 +9,8 @@ use super::node::Pose;
 use super::selection::{self, Interaction, NodeQ, Selection};
 use super::touch::Pointer;
 
-/// Cursor matching a handle whose outward direction is `dir` (world space, y up).
-/// Rotated nodes therefore get correctly rotated diagonal cursors.
+/// cursor matching a handle whose outward direction is `dir` (world, y up);
+/// rotated nodes get rotated diagonal cursors.
 fn resize_cursor(dir: Vec2) -> SystemCursorIcon {
     let oct = (dir.to_angle() / (std::f32::consts::PI / 4.0)).round() as i32;
     match oct.rem_euclid(8) {
@@ -34,7 +34,7 @@ fn handle_dir(frame: &Pose, kind: HitKind) -> Vec2 {
     hit::rot2(frame.rot) * d
 }
 
-/// Cursor when merely hovering (no button held).
+/// cursor when merely hovering (no button held).
 fn hover_cursor(
     window: &Window,
     camera: &Camera,
@@ -53,8 +53,8 @@ fn hover_cursor(
     })
 }
 
-/// Runs late (after egui's own cursor handling) so canvas cursors win while
-/// the pointer is over the canvas, and egui's win while it's over the UI.
+/// runs late (after egui's cursor handling) so canvas cursors win over the
+/// canvas and egui's win over its ui.
 pub fn update_cursor(
     window: Single<(Entity, &Window), With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform)>,
@@ -69,8 +69,7 @@ pub fn update_cursor(
 ) {
     let (window_entity, window) = *window;
 
-    // The component may not exist yet (bevy_egui only adds it when egui
-    // requests an icon).
+    // bevy_egui only adds the component once egui requests an icon.
     if cursor_icons.get(window_entity).is_err() {
         commands
             .entity(window_entity)
@@ -80,10 +79,10 @@ pub fn update_cursor(
 
     let (camera, cam_tf) = *camera;
     let icon = if pointer.touch_active {
-        // Touch has no hover cursor; reset anything left from the mouse.
+        // touch has no hover cursor; reset anything left from the mouse.
         Some(SystemCursorIcon::Default)
     } else if crate::canvas::egui_pointer_busy(&mut contexts) {
-        // Over the HUD / menus: egui owns the cursor.
+        // over the hud / menus: egui owns the cursor.
         None
     } else if view.is_panning() || view.wheel_pan {
         Some(SystemCursorIcon::Grabbing)
@@ -102,8 +101,8 @@ pub fn update_cursor(
                 Some(SystemCursorIcon::Move)
             }
             Interaction::Rotate(_) => Some(SystemCursorIcon::Crosshair),
-            // Nothing special under the pointer: reset to the default arrow,
-            // otherwise the handle cursor would stay stuck.
+            // nothing special under the pointer: reset to the default arrow,
+            // or the handle cursor stays stuck.
             _ => Some(
                 hover_cursor(window, camera, cam_tf, &selection, &q)
                     .unwrap_or(SystemCursorIcon::Default),

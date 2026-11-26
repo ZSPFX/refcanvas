@@ -1,4 +1,4 @@
-//! Selection overlay: outline, handles, marquee (drawn with gizmos).
+//! selection overlay: outline, handles, marquee (drawn with gizmos).
 
 use bevy::prelude::*;
 
@@ -13,25 +13,20 @@ use crate::theme::Accent;
 
 const HANDLE_FILL: Color = Color::srgb(0.96, 0.96, 0.96);
 const GUIDE: Color = Color::srgba(1.0, 0.35, 0.65, 0.9);
-/// Dim boundary drawn around the gray fill of texture-pending nodes.
+/// dim boundary drawn around the gray fill of texture-pending nodes.
 const PENDING_LOAD: Color = Color::srgb(0.30, 0.30, 0.30);
 
-/// Rotation-zone hints: a tiny rounded elbow (two very short edge lines
-/// joined by a quarter arc, a CSS `border-top`/`border-right` with
-/// `border-radius`) floating just outside each selection corner, where the
-/// rotate grab zone lives. Logical px; scaled by `wpp` at draw time.
+// rotation-zone hint: tiny elbow just outside each corner, logical px
 const ROTATE_HINT_GAP: f32 = 12.0;
 const ROTATE_HINT_RADIUS: f32 = 9.0;
 const ROTATE_HINT_TAIL: f32 = 5.0;
 
-/// Marquee outline alpha (the hue follows the desktop accent; see
-/// [`crate::theme::Accent`]).
+/// marquee outline alpha (hue follows the accent; see [`crate::theme::Accent`]).
 const ACCENT_SOFT_ALPHA: f32 = 0.4;
-/// Translucent fill for the drag-selection marquee. Gizmos can only stroke, so
-/// the fill is a plain sprite kept above the canvas content (below the camera
-/// at z = 1000). Tune alpha here.
+/// translucent marquee fill; gizmos can only stroke, so the fill is a plain
+/// sprite kept below the camera at z = 1000.
 const MARQUEE_FILL_ALPHA: f32 = 0.10;
-/// Above the nodes (ZCounter grows from 1) and below the camera at z = 1000.
+/// above nodes (ZCounter grows from 1), below the camera at z = 1000.
 const MARQUEE_FILL_Z: f32 = 900.0;
 
 #[derive(Component)]
@@ -54,7 +49,7 @@ pub fn update_marquee_fill(
     let Ok((mut tf, mut sprite, mut vis)) = fill.single_mut() else {
         return;
     };
-    // The desktop accent can change at runtime; keep the fill in sync.
+    // the desktop accent can change at runtime; keep the fill in sync.
     let want = accent.alpha(MARQUEE_FILL_ALPHA);
     if sprite.color != want {
         sprite.color = want;
@@ -105,28 +100,26 @@ pub fn draw_selection(
             handle_square(&mut gizmos, edge_world(&frame, i), hs, accent_color);
         }
 
-        // Rotation hints: at each corner, two very short lines along the
-        // offset edges of a phantom rounded rectangle, joined by a quarter
-        // arc, the rotate zone sits right there (just outside the corner).
+        // rotation hints: short lines along the offset edges of a phantom rounded
+        // rect, joined by a quarter arc, marking the rotate zone just outside.
         let rot = rot2(frame.rot);
         let gap = ROTATE_HINT_GAP * wpp;
-        // Shrink the elbow on tiny selections so neighbouring hints and
-        // stubs can't run into each other.
+        // shrink the elbow on tiny selections so hints and stubs can't collide.
         let side = frame.size.x.min(frame.size.y);
         let radius = (ROTATE_HINT_RADIUS * wpp).min((side * 0.5 - gap).max(1.0));
         let tail = (ROTATE_HINT_TAIL * wpp).min(side * 0.25);
         for i in 0..4 {
             let d = CORNER_DIRS[i];
             let outer = corner_world(&frame, i) + rot * (d * gap);
-            // Rounded-rectangle corner: arc center pulled in by the radius.
+            // rounded-rectangle corner: arc center pulled in by the radius.
             let center = outer - rot * Vec2::new(d.x * radius, d.y * radius);
-            // Tangency points on the two offset edges meeting at the corner.
+            // tangency points on the two offset edges meeting at the corner.
             let from = center + rot * Vec2::new(0.0, d.y * radius);
             let to = center + rot * Vec2::new(d.x * radius, 0.0);
             gizmos
                 .short_arc_2d_between(center, from, to, accent_color)
                 .resolution(12);
-            // The short straight stubs continuing the arc along each edge.
+            // short straight stubs continuing the arc along each edge.
             gizmos.line_2d(from, from + rot * Vec2::new(-d.x * tail, 0.0), accent_color);
             gizmos.line_2d(to, to + rot * Vec2::new(0.0, -d.y * tail), accent_color);
         }
@@ -140,10 +133,8 @@ pub fn draw_selection(
         );
     }
 
-    // Snap guides while moving or resizing: each line spans only the boxes
-    // it aligns (the dragged one plus every matched node), with a small tick
-    // at each box edge it passes through, so it's obvious what snapped to
-    // what. Boxes outside the view can't snap (see `snap_candidates`).
+    // snap guides span only the boxes they align, with a tick per matched edge.
+    // boxes outside the view can't snap (see snap_candidates).
     match &*interaction {
         Interaction::Move {
             guide_x, guide_y, ..
@@ -153,9 +144,8 @@ pub fn draw_selection(
     }
 }
 
-/// Draw the alignment guides for the given axes: line + an × on every
-/// *other* box edge it touches (the dragged selection itself stays clean,
-/// its span only contributes to the line's extent).
+/// draw alignment guides: line plus an × on every matched box edge (the dragged
+/// selection only widens the line).
 fn draw_guides(
     gizmos: &mut Gizmos,
     guide_x: &Option<SnapGuide>,
@@ -163,7 +153,7 @@ fn draw_guides(
     wpp: f32,
 ) {
     let pad = 6.0 * wpp;
-    // Half-extent of the × marker: noticeably larger than the old tick.
+    // half-extent of the × marker.
     let cross = 5.0 * wpp;
     if let Some(g) = guide_x {
         let (lo, hi) = g.extent();
@@ -192,7 +182,7 @@ fn draw_guides(
     }
 }
 
-/// A small × marking where a guide crosses a box edge.
+/// a small × marking where a guide crosses a box edge.
 fn draw_cross(gizmos: &mut Gizmos, at: Vec2, half: f32) {
     let d = Vec2::splat(half);
     gizmos.line_2d(at - d, at + d, GUIDE);
@@ -205,10 +195,8 @@ fn handle_square(gizmos: &mut Gizmos, pos: Vec2, size: f32, accent: Color) {
     gizmos.rect_2d(iso, Vec2::splat(size * 0.58), HANDLE_FILL);
 }
 
-/// Dim boundary around nodes of the active tab that are placed but still
-/// waiting for their texture (project restore: only the transparent
-/// placeholder is bound until the preview loads). Without it a restoring
-/// canvas looks empty, with nodes popping in one by one.
+/// faint boundary around nodes waiting for a texture, so a restoring canvas
+/// doesn't look empty.
 pub fn draw_pending_loads(
     mut gizmos: Gizmos,
     tabs: Res<Tabs>,
@@ -224,8 +212,7 @@ pub fn draw_pending_loads(
         let Some(img) = node.image() else {
             continue;
         };
-        // A pending preview whose full-res texture already bound is visible:
-        // no placeholder needed.
+        // full-res already bound: visible, no placeholder needed.
         if !img.data.preview_pending || img.full.is_some() {
             continue;
         }

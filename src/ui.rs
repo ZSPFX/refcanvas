@@ -46,7 +46,7 @@ impl Plugin for UiPlugin {
     }
 }
 
-/// Whether the primary window should stay above other windows.
+/// window stays above others.
 #[derive(Resource)]
 pub struct AlwaysOnTop(pub bool);
 
@@ -57,9 +57,8 @@ impl Default for AlwaysOnTop {
     }
 }
 
-/// Apply the window level on the main thread. On native Wayland winit has no
-/// always-on-top request; the preference is still saved so the next launch can
-/// use the X11 compatibility backend.
+/// set the level on the main thread; native wayland has no request, so the
+/// saved preference only applies after an x11/xwayland launch.
 fn apply_always_on_top(
     _: NonSendMarker,
     state: Res<AlwaysOnTop>,
@@ -84,7 +83,7 @@ fn apply_always_on_top(
     });
 }
 
-/// Our own right-click menu state (canvas interactions are not egui widgets).
+/// right-click menu state; canvas isn't made of egui widgets.
 #[derive(Resource, Default)]
 struct ContextMenu {
     open: bool,
@@ -100,15 +99,7 @@ struct FpsCounter {
     fps: f32,
 }
 
-// ---------------------------------------------------------------------------
-// Accent
-// ---------------------------------------------------------------------------
-
-/// Tint egui's selection/hover visuals with the desktop accent. egui 0.36
-/// paints a selected tab / menu entry from `selection.bg_fill` +
-/// `selection.stroke.color` (`widget_style::button_style`), and hovers from
-/// `widgets.hovered.weak_bg_fill`, those are the fields set here. Applied on
-/// change only; the accent itself is polled by [`crate::theme`].
+/// tint egui selection/hover visuals with the accent; applied on change only.
 fn apply_accent_style(
     mut contexts: EguiContexts,
     accent: Res<Accent>,
@@ -132,23 +123,16 @@ fn apply_accent_style(
     } else {
         egui::Color32::WHITE
     };
-    // NB: egui 0.36 has no `Context::style_mut`; `all_styles_mut` applies to
-    // both the dark and light styles, so the tint sticks whichever is active.
+    // no style_mut here; all_styles_mut covers whichever theme is active.
     ctx.all_styles_mut(|style| {
-        // Selected tab / selected menu entry.
         style.visuals.selection.bg_fill = tint(255);
         style.visuals.selection.stroke.color = on_accent;
-        // Hover / press on other widgets: a subtle tint instead of gray.
         style.visuals.widgets.hovered.weak_bg_fill = tint(64);
         style.visuals.widgets.active.weak_bg_fill = tint(96);
     });
     *applied = Some(rgb);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Context menu
-// ---------------------------------------------------------------------------
 
 enum MenuAction {
     BringToFront,
@@ -198,8 +182,7 @@ fn context_menu_input(
     >,
     q: NodeQ,
 ) {
-    // Close on Escape or on a click *outside* the menu. (Clicks inside the
-    // menu must reach egui, or menu items could never be activated.)
+    // clicks inside the menu belong to egui.
     let pointer_over_egui = crate::canvas::egui_pointer_busy(&mut contexts);
     if keys.just_pressed(KeyCode::Escape) || (pointer.just_pressed && !pointer_over_egui) {
         menu.open = false;
@@ -635,21 +618,18 @@ fn commit_changed(undo: &mut UndoStack, q: &NodeQ, before: Vec<(Entity, NodeSnap
     }
 }
 
-/// Open a folder in the system file manager.
 fn open_folder(dir: &std::path::Path) {
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("explorer").arg(dir).spawn();
-    // macOS has no `xdg-open`: `open` hands the folder to Finder.
+    // macos uses `open` instead of xdg-open.
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(dir).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
 }
 
-/// Reveal a file in the file manager, *selecting* it. On Linux this goes
-/// through the freedesktop `org.freedesktop.FileManager1` D-Bus interface
-/// (Nautilus, Dolphin, Nemo, Caja, Thunar, …); if no file manager answers,
-/// fall back to opening the parent folder without a selection.
+/// reveal and select a file; linux uses the freedesktop dbus interface, with a
+/// fallback to just opening the parent folder.
 fn reveal_in_file_manager(path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     reveal_windows(path);
@@ -665,8 +645,7 @@ fn reveal_in_file_manager(path: &std::path::Path) {
         let selected = std::process::Command::new("dbus-send")
             .args([
                 "--session",
-                // Wait for the reply: a missing file manager must be an error
-                // (→ fallback), not a fire-and-forget success.
+                // wait for the reply so a missing file manager falls back.
                 "--print-reply",
                 "--dest=org.freedesktop.FileManager1",
                 "/org/freedesktop/FileManager1",
@@ -685,11 +664,8 @@ fn reveal_in_file_manager(path: &std::path::Path) {
     }
 }
 
-/// Windows: `explorer /select,` is unreliable, the already-running shell
-/// often drops the argument and opens Documents instead, so call the shell
-/// API itself (the same one the `showfile` crate wraps, via the `windows-sys`
-/// copy already in the dependency tree). Runs on its own COM-initialized
-/// thread: the main thread's apartment belongs to winit/wgpu.
+/// windows: `explorer /select,` often drops the argument, so call the shell api
+/// directly; own thread because the main one's COM apartment belongs to winit.
 #[cfg(target_os = "windows")]
 fn reveal_windows(path: &std::path::Path) {
     use std::os::windows::ffi::OsStrExt;
@@ -698,8 +674,7 @@ fn reveal_windows(path: &std::path::Path) {
     };
     use windows_sys::Win32::UI::Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName};
 
-    // The shell protocol wants native separators (a session carried over
-    // from Linux can still hold `/` in the root).
+    // shell wants native separators; a session from linux can still hold '/'.
     let path: std::path::PathBuf = path.components().collect();
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
@@ -707,9 +682,7 @@ fn reveal_windows(path: &std::path::Path) {
     std::thread::spawn(move || unsafe {
         let hr = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
         let mut pidl = std::ptr::null_mut();
-        // With `cidl == 0` and a null `apidl`, the parsed PIDL doubles as the
-        // item to select, the documented "show one file" call. (Passing the
-        // file's PIDL as the folder one is the standard shortcut.)
+        // cidl 0 + null apidl: the parsed pidl is the item to select.
         if SHParseDisplayName(
             wide.as_ptr(),
             std::ptr::null_mut(),
@@ -730,8 +703,8 @@ fn reveal_windows(path: &std::path::Path) {
     });
 }
 
-/// `file://` URI for a path, percent-encoding everything outside the
-/// unreserved set (spaces, `#`, non-ASCII, …), `ShowItems` wants real URIs.
+/// `file://` uri, percent-encoding everything outside the unreserved set;
+/// ShowItems wants real uris.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn file_uri(path: &std::path::Path) -> String {
     use std::os::unix::ffi::OsStrExt;
@@ -747,13 +720,7 @@ fn file_uri(path: &std::path::Path) -> String {
     uri
 }
 
-// ---------------------------------------------------------------------------
-// Frame rename
-// ---------------------------------------------------------------------------
-
-/// Text field opened by double-clicking a frame's label (see [`FrameRename`]):
-/// Enter or clicking away commits, Escape cancels. Positioned over the label
-/// every frame, so it follows pans/zooms.
+/// rename field over a frame label: enter or click-away commits, escape cancels.
 fn frame_rename_ui(
     mut contexts: EguiContexts,
     mut rename: ResMut<FrameRename>,
@@ -773,12 +740,12 @@ fn frame_rename_ui(
     };
     let ctx = contexts.ctx_mut()?;
 
-    // The frame can disappear mid-edit (delete, tab close, undo).
+    // frame can vanish mid-edit (delete, tab close, undo).
     let Ok((_, tf, _, mut node)) = q.get_mut(frame) else {
         rename.clear();
         return Ok(());
     };
-    // Switching tabs abandons the edit (the frame is hidden there anyway).
+    // switching tabs abandons the edit.
     let frame_tab = q_own.get(frame).ok().map(|(_, owner)| owner.0);
     if frame_tab != tabs.active_id() {
         rename.clear();
@@ -786,8 +753,7 @@ fn frame_rename_ui(
     }
 
     let wpp = (view.scale() as f32).max(1e-4);
-    // Anchor at the label's top-left; if the label is hidden (frame too small
-    // on screen), fall back to the frame's own top-left.
+    // label top-left; fall back to the frame's when hidden.
     let (anchor, width) = match label_hits.get(frame) {
         Some(hit_pose) => (
             hit::corner_world(hit_pose, 0),
@@ -802,7 +768,7 @@ fn frame_rename_ui(
         }
     };
     let (camera, cam_tf) = *camera;
-    // Off-screen label: keep the editor alive, just don't draw it.
+    // off-screen: keep the edit alive, just skip drawing.
     let Ok(pos) = camera.world_to_viewport(cam_tf, anchor.extend(0.0)) else {
         return Ok(());
     };
@@ -826,7 +792,6 @@ fn frame_rename_ui(
                 if resp.has_focus() {
                     rename.had_focus = true;
                 }
-                // Escape cancels (reverts); Enter or clicking away commits.
                 if rename.had_focus {
                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         cancel = true;
@@ -857,10 +822,6 @@ fn frame_rename_ui(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tab bar
-// ---------------------------------------------------------------------------
-
 #[derive(Clone)]
 struct PinIcon {
     texture: egui::TextureHandle,
@@ -890,8 +851,7 @@ fn tab_bar(
     mut always_on_top: ResMut<AlwaysOnTop>,
     mut dialogs: NonSendMut<crate::dialogs::Dialogs>,
     mut dialog_results: ResMut<crate::dialogs::DialogResults>,
-    // A folder picker reports only its path, so remember which menu entry
-    // asked for it until the result arrives.
+    // folder picker reports only a path, so remember which menu asked.
     mut folder_pick_is_new: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -907,8 +867,7 @@ fn tab_bar(
             .max_rect(ctx.viewport_rect()),
     );
 
-    // Symmetric, explicit vertical padding so the row sits dead-centre in the
-    // bar instead of relying on the frame margin plus manual spacing.
+    // explicit symmetric padding so the row sits centred.
     let tabs_frame =
         egui::Frame::side_top_panel(root.style()).inner_margin(egui::Margin::symmetric(8, 4));
     let tabs_panel = egui::Panel::top("refcanvas_tabs")
@@ -916,14 +875,12 @@ fn tab_bar(
         .show(&mut root, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                // Track the tallest tab so the "+" button can match it exactly.
+                // tallest tab sets the "+" button size.
                 let mut row_h = ui.spacing().interact_size.y;
                 let active = tabs.active_id();
                 for (id, name) in tabs.summaries() {
                     let selected = Some(id) == active;
 
-                    // Hover/press feedback is the accent tint only: no outline
-                    // stroke and no expansion around the tab.
                     let resp = ui
                         .scope(|ui| {
                             let v = ui.visuals_mut();
@@ -933,7 +890,7 @@ fn tab_bar(
                             v.widgets.active.expansion = 0.0;
                             ui.selectable_label(selected, truncate(&name, 24))
                         })
-                        .inner; // .inner = the label's Response, so resp.clicked() still works
+                        .inner; // .inner is the label's response
                     row_h = row_h.max(resp.rect.height());
 
                     if resp.clicked() {
@@ -963,17 +920,11 @@ fn tab_bar(
                     });
                     ui.add_space(3.0);
                 }
-                // Window controls live at the far right: the pin toggles
-                // always-on-top, and the "+" opens the project menu. The plus
-                // is hand-painted because the stock menu glyph is not 1:1 or
-                // optically centred.
+                // pin toggles always-on-top, "+" opens the project menu; the plus
+                // is hand-drawn because the stock glyph isn't optically centred.
                 let side = row_h;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Keep both window buttons the same size in every pointer
-                    // state. egui's default hovered/active visuals carry a
-                    // stroked frame, which shrinks the content by a pixel per
-                    // side and makes the whole row grow when the pointer
-                    // leaves.
+                    // flat hover: the default stroke shrinks content and grows the row.
                     let visuals = ui.visuals_mut();
                     visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
                     visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
@@ -1051,7 +1002,7 @@ fn tab_bar(
                 });
             });
         });
-    // Publish the bar's rect so the canvas ignores pointer input over it.
+    // canvas ignores pointer input over the bar.
     ctx.data_mut(|d| {
         d.insert_persisted(
             egui::Id::new(crate::canvas::TAB_BAR_RECT_ID),
@@ -1059,7 +1010,6 @@ fn tab_bar(
         )
     });
 
-    // Folder pickers resolve asynchronously; their results arrive here.
     if let Some(dir) = dialog_results.folders.pop() {
         dialog_results.folders.clear();
         let new_project = *folder_pick_is_new;
@@ -1094,10 +1044,6 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Status HUD
-// ---------------------------------------------------------------------------
-
 fn hud(
     mut contexts: EguiContexts,
     view: Res<View>,
@@ -1108,13 +1054,8 @@ fn hud(
     mut pacer: ResMut<crate::FramePacer>,
     mut fps: Local<FpsCounter>,
 ) -> Result {
-    // Real (unclamped) time so the low-power nap is recognizable: a wake-up
-    // frame arrives with the whole sleep as its delta. Such a gap means the
-    // loop is sleeping at its heartbeat, so put the heartbeat's target rate
-    // on the readout directly, no averaging, no easing down to it, and
-    // start the next window fresh so the wake-up frames count cleanly.
-    // Anything shorter measures normally (short window + light smoothing:
-    // ~0.15 s to settle on real changes).
+    // real time: a wake-up frame carries the whole nap as its delta, so snap
+    // to the heartbeat rate and start the window fresh.
     let dt = real.delta_secs();
     if dt >= crate::IDLE_HEARTBEAT.as_secs_f32() * 0.9 {
         fps.fps = 1.0 / crate::IDLE_HEARTBEAT.as_secs_f32();
@@ -1140,22 +1081,15 @@ fn hud(
 
     egui::Area::new(egui::Id::new("refcanvas_hud"))
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-10.0, -8.0))
-        // The area background is click-through (won't steal canvas drags),
-        // but the area itself stays hit-testable so child widgets, like the
-        // clickable fps readout, can receive input. (`interactable(false)`
-        // would make egui skip this entire layer in its hit-test.)
+        // click-through background, but hit-testable for the fps click.
         .sense(egui::Sense::hover())
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                // Fixed-width numbers: the area is right-anchored, and egui
-                // re-anchors an area a frame after its size changes, a width
-                // change would show as a visible one-frame wobble. Padded to
-                // the widest value each label can reach (zoom: 100·e⁷ ≈
-                // 109647%, fps: 4 digits).
+                // fixed-width numbers: right-anchored areas re-anchor a frame late,
+                // so a width change wobbles. padded to the widest value.
                 ui.label(text(format!("{:>6.0}%", view.zoom_percent())));
-                // Click the fps readout to toggle benchmark mode:
-                // black chip + bright white text + the 120 fps cap lifted.
+                // click fps to toggle benchmark mode (uncapped).
                 let bench = !pacer.cap_enabled;
                 let fps_rt = if bench {
                     text(format!("{:>4.0} fps", fps.fps)).color(egui::Color32::WHITE)
@@ -1173,8 +1107,7 @@ fn hud(
                     .show(ui, |ui| {
                         ui.add(
                             egui::Label::new(fps_rt)
-                                // Selection would give an I-beam cursor and allow
-                                // dragging the text; we only want clicks.
+                                // selection would add an I-beam and allow dragging.
                                 .selectable(false)
                                 .sense(egui::Sense::click()),
                         )

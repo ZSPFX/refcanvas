@@ -1,4 +1,4 @@
-//! Global keyboard shortcuts.
+//! global keyboard shortcuts.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -16,7 +16,7 @@ use super::undo::{NodeData, NodeRecord, UndoEntry, UndoStack};
 use crate::clipboard::{self, SystemClipboard};
 use crate::project::tabs::Tabs;
 
-/// Grouped resources for the shortcut system (Bevy systems take ≤ 16 params).
+/// grouped resources so the shortcut system stays under the 16-param limit
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct ShortcutCtx<'w> {
     pub selection: ResMut<'w, Selection>,
@@ -48,7 +48,6 @@ pub fn shortcuts(
 
     let ctrl = crate::canvas::command_down(&keys, &chord_mem, chord_frame.0);
 
-    // ---- Focus: F frames the selection (or everything), A frames all ----
     let focus_selection = keys.just_pressed(KeyCode::KeyF);
     if focus_selection {
         let mut poses: Vec<Pose> = Vec::new();
@@ -71,8 +70,7 @@ pub fn shortcuts(
         }
     }
 
-    // ---- Arrow keys: hop the selection to the nearest node in that
-    // direction, refocusing with a wider fly-to framing than `F` ----
+    // arrow keys hop to the nearest node, refocusing wider than `F`
     let arrow = if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
         Some(Vec2::Y)
     } else if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
@@ -95,8 +93,7 @@ pub fn shortcuts(
                 .map(|(_, tf, _, node)| (manipulate::current_pose(tf, node), tf.translation.z));
             if let Some((pose, current_z)) = found {
                 let keep = selection::owner_filter(ctx.tabs.active_id(), &q_own);
-                // Visible images are first-class; off-screen ones are the
-                // fallback (see `arrow_target`).
+                // visible images first; off-screen only as a fallback
                 let (cam, cam_tf) = *camera;
                 let view = super::camera::visible_world_rect(cam, cam_tf, window.size());
                 if let Some(target) = arrow_target(&q, &keep, current, &pose, current_z, dir, view)
@@ -107,7 +104,6 @@ pub fn shortcuts(
                         .map(|(_, s)| s.pose)
                         .collect();
                     if !poses.is_empty() {
-                        // Wider than `F`, so the neighbours stay visible.
                         manipulate::focus_poses_with_margin(
                             &poses,
                             window.size(),
@@ -120,13 +116,11 @@ pub fn shortcuts(
         }
     }
 
-    // ---- Reset zoom to 100% ----
     if ctrl && keys.just_pressed(KeyCode::Digit0) {
         let center = ctx.view.center;
         ctx.view.fly_to(center, 0.0);
     }
 
-    // ---- Delete ----
     if keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace]) {
         let tab_id = ctx.tabs.active_id().unwrap_or(0);
         manipulate::delete_selection_undoable(
@@ -139,7 +133,7 @@ pub fn shortcuts(
         *ctx.interaction = Interaction::Idle;
     }
 
-    // ---- Escape: cancel the current drag (restoring state) or deselect ----
+    // escape cancels the drag, or deselects when idle
     if keys.just_pressed(KeyCode::Escape) {
         if ctx.interaction.is_idle() {
             ctx.selection.clear();
@@ -148,7 +142,6 @@ pub fn shortcuts(
         }
     }
 
-    // ---- Selection & clipboard ----
     if ctrl && keys.just_pressed(KeyCode::KeyA) {
         let keep = selection::owner_filter(ctx.tabs.active_id(), &q_own);
         manipulate::select_all(&q, keep, &mut ctx.selection);
@@ -177,9 +170,8 @@ pub fn shortcuts(
             ctx.undo.push(UndoEntry::Added { items: new });
         }
     }
-    // Ctrl+V (and Ctrl+Shift+V, historically the file-paste shortcut, the
-    // Wayland stand-in for drag-and-drop) reads the *system* clipboard: an
-    // image becomes a new node, files copied in a file manager are imported.
+    // ctrl+v (and ctrl+shift+v, the file-paste fallback for drag-and-drop) reads
+    // the system clipboard: an image becomes a node, files get imported.
     if ctrl && keys.just_pressed(KeyCode::KeyV) {
         let at = window
             .cursor_position()
@@ -188,7 +180,6 @@ pub fn shortcuts(
         clipboard::request_paste(&mut ctx.system_clipboard, at);
     }
 
-    // ---- Ctrl+G: wrap the selection in a frame ----
     if ctrl && keys.just_pressed(KeyCode::KeyG) && !ctx.selection.nodes.is_empty() {
         let poses: Vec<Pose> = selection::gather_snapshots(&q, &ctx.selection.nodes)
             .into_iter()
@@ -196,9 +187,8 @@ pub fn shortcuts(
             .collect();
         if let Some(bounds) = manipulate::union_aabb(&poses) {
             let pad = 8.0 * ctx.view.scale() as f32;
-            // Union AABB, not `selection_frame`: for a single node that
-            // returns its own (possibly rotated) rect, which would leave the
-            // frame cutting across a rotated image instead of containing it.
+            // union aabb, not `selection_frame`: the single-node case returns its
+            // rotated rect, which would cut across the image instead of containing it.
             let pose = Pose {
                 center: bounds.center(),
                 size: bounds.size() + Vec2::splat(pad * 2.0),
@@ -210,17 +200,14 @@ pub fn shortcuts(
                 .iter()
                 .filter_map(|e| q.get(*e).ok().map(|(_, tf, _, _)| tf.translation.z))
                 .fold(f32::INFINITY, f32::min);
-            // Below every selected node. `min` first so a missing z (inf)
-            // can't put the frame on top of the stack.
+            // below every selected node; `min` first so a missing z (inf) can't
+            // put the frame on top.
             let z = min_z.min(ctx.zc.0) - 0.5;
             let tab_id = ctx.tabs.active_id().unwrap_or(0);
             let label = "Frame".to_string();
             let e = frames::spawn_frame(&mut commands, tab_id, true, None, label.clone(), pose, z);
-            // Keep the previous selection (the framed nodes) instead of
-            // selecting the new frame: the selection outline + handles are
-            // drawn right at the frame's border, which with the tight padding
-            // reads as the frame sitting on top of a single image. Click the
-            // frame to select/move the group.
+            // keep the framed nodes selected, not the new frame: its outline and
+            // handles would sit on the image and read as a second selection.
             ctx.undo.push(UndoEntry::Added {
                 items: vec![NodeRecord {
                     entity: e,
@@ -239,7 +226,6 @@ pub fn shortcuts(
         }
     }
 
-    // ---- Grid visibility ----
     if !ctrl
         && !crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0)
         && keys.just_pressed(KeyCode::KeyG)
@@ -248,14 +234,11 @@ pub fn shortcuts(
     }
 }
 
-/// Sample rays cast across the selection's cross-section for arrow hops.
+/// rays sampled across the selection's cross-section for arrow hops
 const ARROW_RAYS: usize = 17;
 
-/// Arrow-key target. On-screen images are first-class: the ray vote runs over
-/// the camera's visible world rect first, and only when nothing visible in
-/// that direction catches the rays do off-screen candidates act as a
-/// fallback (so the hop flies the camera back to something you can't see only
-/// when there is no visible next step).
+/// on-screen images first: vote over the visible rect, then fall back to
+/// off-screen candidates only when nothing visible catches the rays.
 fn arrow_target(
     q: &NodeQ,
     keep: &impl Fn(Entity) -> bool,
@@ -271,23 +254,8 @@ fn arrow_target(
     ray_vote(q, keep, current, pose, current_z, dir, None)
 }
 
-/// Cast [`ARROW_RAYS`] parallel rays across the selected node's cross-section
-/// from its centre plane, marching in `dir`. Each ray votes for the *nearest*
-/// node it enters, including a node lying on top of the selection, which the
-/// ray starts inside, and the node with the best score wins:
-///
-/// ```text
-/// score = coverage * selection_length - entry_distance
-/// ```
-///
-/// Distance (from the selection's centre plane to the node's near edge, in
-/// "selection lengths") is what ranks candidates: a much closer node wins
-/// even from a diagonal, and a neighbour down the row beats the same row
-/// further away. Coverage, how much of the cross-section the node catches,
-/// acts as a bonus worth up to one selection length, so a barely clipping
-/// sliver can't outrank an adjacent aligned neighbour. When `view` is set,
-/// only nodes overlapping it are considered. Frames are containers, not hop
-/// targets; they never catch rays either.
+/// cast [`ARROW_RAYS`] rays across the selection, each voting for the nearest
+/// node it enters; score = coverage * selection_length - entry_distance.
 fn ray_vote(
     q: &NodeQ,
     keep: &impl Fn(Entity) -> bool,
@@ -309,10 +277,10 @@ fn ray_vote(
     } else {
         cur.center().y
     };
-    // Distance unit for the vote decay: the selection's extent along the ray.
+    // vote decay unit: the selection's extent along the ray
     let unit = if vertical { cur.size().x } else { cur.size().y }.max(1.0);
 
-    // Nearest hit per sample ray: (entry distance, z, entity).
+    // per-ray nearest hit (entry, z, entity)
     let mut nearest: Vec<Option<(f32, f32, Entity)>> = vec![None; ARROW_RAYS];
     for (e, tf, _, node) in q.iter() {
         if e == current || !keep(e) || node.kind.is_frame() {
@@ -321,7 +289,7 @@ fn ray_vote(
         let r = hit::aabb_of(&manipulate::current_pose(tf, node));
         if let Some(view) = view {
             if !hit::rects_overlap(r, view) {
-                continue; // Off-screen in this pass.
+                continue;
             }
         }
         let (perp_lo, perp_hi, near, far) = if vertical {
@@ -330,16 +298,14 @@ fn ray_vote(
             (r.min.x, r.max.x, r.min.y, r.max.y)
         };
         let d = if vertical { dir.x } else { dir.y };
-        // Wholly behind the centre plane: the rays never reach it.
         if (far - plane) * d <= 0.0 {
             continue;
         }
-        // Distance from the plane to the box's near edge (0 when the rays
-        // start inside it, a box lying over the selection).
+        // distance to the near edge; 0 when the rays start inside, i.e. a box
+        // lying over the selection.
         let entry = ((near - plane) * d).max(0.0);
-        // A box the rays start inside only counts when it's drawn above the
-        // selection: that's the "image on top" hop. A box underneath the
-        // same spot must not steal the hop (it would just toggle back).
+        // a box the rays start inside counts only when drawn above the selection;
+        // one underneath would just steal the hop and toggle back.
         let z = tf.translation.z;
         if entry == 0.0 && z <= current_z {
             continue;
@@ -347,7 +313,7 @@ fn ray_vote(
         for (i, slot) in nearest.iter_mut().enumerate() {
             let t = band_lo + (band_hi - band_lo) * i as f32 / (ARROW_RAYS - 1) as f32;
             if t < perp_lo || t > perp_hi {
-                continue; // This ray misses the box.
+                continue;
             }
             let better = match *slot {
                 None => true,
@@ -359,9 +325,6 @@ fn ray_vote(
         }
     }
 
-    // Rank by distance, with coverage worth up to one selection length: a
-    // clearly closer node wins, and among similarly placed ones the one the
-    // rays mostly run into wins.
     let mut votes: Vec<(Entity, f32, f32)> = Vec::new();
     for slot in nearest.iter().flatten() {
         let (entry, _, e) = *slot;

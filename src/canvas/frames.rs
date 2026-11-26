@@ -1,4 +1,4 @@
-//! Frames: labeled containers. Dragging a frame moves the images inside it.
+//! frames: labeled containers that drag their images along.
 
 use std::collections::HashMap;
 
@@ -14,17 +14,15 @@ use crate::project::oplog::NodeId;
 use crate::project::tabs::Tabs;
 use crate::theme::Accent;
 
-/// Frame fill/border alphas; the hue follows the desktop accent; see
-/// [`crate::theme::Accent`]. The fill sprite, the border gizmo and the label
-/// text all stay in sync with the accent, which can change at runtime.
+/// frame fill/border/label alphas and label font size; hue follows the desktop
+/// accent, which can change at runtime, so fill, border and label stay in sync.
 const FRAME_FILL_ALPHA: f32 = 0.025;
 const FRAME_BORDER_ALPHA: f32 = 0.28;
 const LABEL_ALPHA: f32 = 0.8;
 const LABEL_FONT_SIZE: f32 = 16.0;
 
-/// World-space hit boxes of the labels currently drawn (frame entity → label
-/// pose), refreshed by [`update_frame_labels`]. Picking consults this so the
-/// text works like frame chrome: click or drag it to select/move the frame.
+/// world-space label hit boxes, refreshed by [`update_frame_labels`]; picking
+/// treats the text as chrome, so a click selects or moves the frame.
 #[derive(Resource, Default)]
 pub struct FrameLabelHits(HashMap<Entity, Pose>);
 
@@ -34,27 +32,24 @@ impl FrameLabelHits {
     }
 }
 
-/// Double-click window for entering the label rename editor.
+/// double-click window for the label rename editor
 pub const LABEL_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(350);
 
-/// In-canvas frame rename state: double-clicking a frame's label opens a text
-/// field over it (Enter or clicking away commits, Escape cancels).
+/// double-click a label to edit; enter/click-away commits, escape cancels
 #[derive(Resource, Default)]
 pub struct FrameRename {
     pub frame: Option<Entity>,
     pub text: String,
-    /// Grab keyboard focus on the next UI frame.
+    /// grab focus on the next ui frame
     pub focus_me: bool,
-    /// True once the field actually had focus, so a focus request that fails
-    /// can't read as "unfocused" and commit instantly.
+    /// had focus at least once, so a failed focus request can't commit instantly
     pub had_focus: bool,
-    /// (time, frame) of the last single click on a label, for double-click
-    /// detection.
+    /// (time, frame) of the last label click, for double-click detection
     pub last_click: Option<(std::time::Instant, Entity)>,
 }
 
 impl FrameRename {
-    /// Begin editing `frame`, seeded with its current label.
+    /// seed the editor with the current label
     pub fn start(&mut self, frame: Entity, label: String) {
         self.frame = Some(frame);
         self.text = label;
@@ -68,7 +63,6 @@ impl FrameRename {
     }
 }
 
-/// Spawn a frame node (fill sprite + child label).
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_frame(
     commands: &mut Commands,
@@ -89,8 +83,7 @@ pub fn spawn_frame(
                 size: pose.size,
                 rotation: pose.rot,
             },
-            // Transparent here; `update_frame_colors` tints it with the
-            // desktop accent (the theme can change at runtime).
+            // transparent here; `update_frame_colors` tints it every frame
             Sprite::from_color(Color::NONE, pose.size),
             Transform {
                 translation: Vec3::new(pose.center.x, pose.center.y, z),
@@ -128,9 +121,8 @@ pub fn spawn_frame(
     frame
 }
 
-/// Tint frame fills and labels with the desktop accent. The accent can change
-/// at runtime (see [`crate::theme`]), so this runs every frame and only writes
-/// on change, like the marquee fill.
+/// tint fills and labels with the desktop accent; it can change at runtime, so
+/// this runs every frame but only writes on change.
 pub fn update_frame_colors(
     accent: Res<Accent>,
     mut fills: Query<(&mut Sprite, &CanvasNode), Without<InactiveTab>>,
@@ -150,14 +142,13 @@ pub fn update_frame_colors(
     }
 }
 
-/// Keep labels at a constant on-screen size, just above the frame's top edge.
-/// Also records each visible label's world-space box in [`FrameLabelHits`] for
-/// picking (the text doubles as a grab handle for the frame).
+/// keep labels at constant screen size above the frame, and record their
+/// world-space boxes for picking.
 pub fn update_frame_labels(
     view: Res<View>,
     tabs: Res<Tabs>,
-    // `Without<FrameLabel>` makes this disjoint from the label query below
-    // (both touch `Transform`): frame entities never carry the label marker.
+    // `Without<FrameLabel>` makes this disjoint from the label query: both
+    // touch `Transform`.
     frames: Query<(&CanvasNode, &TabOwner, &Transform), (Without<FrameLabel>, Without<InactiveTab>)>,
     mut labels: Query<(
         &FrameLabel,
@@ -188,8 +179,7 @@ pub fn update_frame_labels(
             0.0,
         );
 
-        // The text is BOTTOM_LEFT-anchored at `translation`; layout is in
-        // physical px, so convert to logical before scaling to world units.
+        // bottom-left anchored; layout is physical px, convert to logical first
         let logical = layout.size / layout.scale_factor.max(1e-4);
         // 2 logical px of grab padding all around.
         let size = (logical * wpp).max(Vec2::ZERO) + Vec2::splat(2.0 * wpp);
@@ -206,7 +196,6 @@ pub fn update_frame_labels(
     }
 }
 
-/// Draw borders for all frames of the active tab.
 pub fn draw_frame_borders(
     mut gizmos: Gizmos,
     accent: Res<Accent>,
@@ -226,7 +215,7 @@ pub fn draw_frame_borders(
     }
 }
 
-/// Image nodes whose centers fall inside any of the given frame poses.
+/// images whose centers fall inside any frame pose
 pub fn contained_images(frames: &[Pose], q: &NodeQ) -> Vec<Entity> {
     let mut out = Vec::new();
     if frames.is_empty() {

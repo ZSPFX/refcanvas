@@ -1,15 +1,5 @@
-//! Shared-project operation log.
-//!
-//! A project folder may be replicated between machines by an external folder
-//! sync tool. The only shared state this app writes is an append-only journal
-//! per session, plus immutable full-state checkpoints. Each file has exactly
-//! one writer, so replication can deliver files in any order and at any time
-//! without creating a merge target that two machines write.
-//!
-//! Every row change is a last-writer-wins register keyed by a stable node id
-//! and ordered by a hybrid logical clock. Merging is commutative, associative
-//! and idempotent: replaying a file or receiving it late never changes the
-//! result, and merged state is never written back into the shared folder.
+//! shared-project operation log: one writer per file, session journals plus
+//! immutable checkpoints; LWW rows by hybrid clock, idempotent, never written back.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -25,15 +15,10 @@ use uuid::Uuid;
 
 pub type NodeId = Uuid;
 
-// ---------------------------------------------------------------------------
-// Clock
-// ---------------------------------------------------------------------------
+// clock
 
-/// One operation revision: wall-clock milliseconds, a counter for equal
-/// milliseconds, the originating device and a per-op nonce.
-///
-/// Ordering is derived field-by-field, so every machine resolves the same
-/// winner even when two devices edit the same node concurrently.
+/// revision: wall-clock ms, counter for equal ms, device, per-op nonce.
+/// orders field-by-field so every machine picks the same winner.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Rev {
     pub w: u64,
@@ -73,9 +58,8 @@ fn nonce() -> u32 {
     u32::from_le_bytes(hash.as_bytes()[..4].try_into().unwrap())
 }
 
-/// Hybrid logical clock. Ticks are monotonic even if the system clock jumps
-/// backwards, and observing remote revisions keeps new local edits ordered
-/// after everything this machine has already merged.
+/// hybrid logical clock: monotonic ticks across backward clock jumps, and
+/// observed remote revs keep new local edits ordered after merged state.
 #[derive(Clone, Debug)]
 pub struct Clock {
     device: String,
@@ -128,12 +112,8 @@ impl Clock {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Stored node state
-// ---------------------------------------------------------------------------
+// stored node state
 
-/// The complete persisted state of one canvas node. This is the payload of an
-/// upsert op and of a checkpoint row.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct SavedNode {
     pub kind: String,
@@ -167,16 +147,13 @@ pub struct VersionedNode {
     pub node: Option<SavedNode>,
 }
 
-/// A change that must be applied to the live scene.
 #[derive(Clone, Debug)]
 pub enum Change {
     Upsert(NodeId),
     Remove(NodeId),
 }
 
-// ---------------------------------------------------------------------------
-// Journal wire format
-// ---------------------------------------------------------------------------
+// journal wire format
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Op {
@@ -213,12 +190,10 @@ struct Checkpoint {
     nodes: HashMap<NodeId, VersionedNode>,
 }
 
-// ---------------------------------------------------------------------------
-// Merge state
-// ---------------------------------------------------------------------------
+// merge state
 
-/// Merged view of every journal and checkpoint seen so far, plus the highest
-/// revision merged per device. Serializable so it can be cached locally.
+/// merged view of every journal and checkpoint seen so far, with the highest
+/// revision merged per device.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MergeState {
     #[serde(default)]
@@ -253,9 +228,8 @@ impl MergeState {
         }
     }
 
-    /// Record that this revision has been inspected, even when it lost to a
-    /// newer value. This keeps checkpoint watermarks accurate and lets later
-    /// passes skip already-seen journal rows.
+    /// record a rev as seen even when it lost, so watermarks stay accurate and
+    /// later passes can skip the row.
     pub fn observe(&mut self, rev: &Rev) {
         self.seen_rev(rev);
     }
@@ -283,7 +257,7 @@ impl MergeState {
         self.nodes.is_empty()
     }
 
-    /// Visible nodes in a stable order (z, then id) for scene loading.
+    /// visible nodes, ordered by z then id.
     pub fn visible_nodes(&self) -> Vec<(NodeId, &SavedNode)> {
         let mut out: Vec<(NodeId, &SavedNode)> = self
             .nodes
@@ -305,9 +279,7 @@ impl MergeState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Journal writer
-// ---------------------------------------------------------------------------
+// journal writer
 
 fn safe_device(device: &str) -> String {
     device
@@ -323,10 +295,8 @@ pub struct Journal {
 }
 
 impl Journal {
-    /// Create this session's (empty) journal and close it immediately. Keeping
-    /// the name visible from startup lets peers discover the session without
-    /// waiting for a directory-cache refresh, while no handle is held between
-    /// batches.
+    /// create this session's empty journal, then close it: peers see the name
+    /// without waiting on a directory-cache refresh.
     pub fn create(dir: &Path, device: &str) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
         let safe = safe_device(device);
@@ -371,9 +341,8 @@ impl Journal {
         };
         let mut line = serde_json::to_vec(&batch)?;
         line.push(b'\n');
-        // Open/write/close for every batch. A long-lived handle on a network
-        // share can hold a lease that keeps metadata and the appended data
-        // invisible to other clients until the process exits.
+        // open/write/close per batch: a long-lived handle on a network share can
+        // hold a lease that hides appended data from other clients.
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -386,7 +355,7 @@ impl Journal {
     }
 }
 
-/// remove zero-length session journals; they contain no ops
+/// remove zero-length session journals.
 pub fn prune_empty_journals(dir: &Path, keep: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -524,17 +493,14 @@ pub fn trim_journal_tail(
     trimmed
 }
 
-// ---------------------------------------------------------------------------
-// Incremental reader
-// ---------------------------------------------------------------------------
+// incremental reader
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileMark {
-    /// Offset just past the last complete line (journals) or the file length
-    /// (checkpoints).
+    /// offset past the last complete line, or full length for checkpoints.
     pub len: u64,
     pub mtime_ns: u128,
-    /// Hash of the first block, used to notice a same-length replacement.
+    /// hash of the first block, catches same-length replacement.
     #[serde(default)]
     pub head: u64,
 }
@@ -557,7 +523,7 @@ fn head_hash(path: &Path) -> std::io::Result<u64> {
     Ok(u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap()))
 }
 
-/// Read new ops from every journal (including conflict copies) and merge them.
+/// read new ops from every journal, including conflict copies.
 pub fn read_project(root: &Path, state: &mut MergeState, marks: &mut Marks) -> Result<Vec<Change>> {
     let mut changes = Vec::new();
     read_checkpoints(&root.join("checkpoints"), state, marks, &mut changes)?;
@@ -590,9 +556,8 @@ fn read_journals(
         }
         let key = format!("journal/{name}");
         let mark = marks.get(&key).copied();
-        // Open every poll instead of trusting cached size/mtime. Network
-        // filesystems can report stale metadata for a file another client is
-        // writing; the open/fstat/read path is what forces revalidation.
+        // open every poll instead of trusting cached size/mtime: network fs can
+        // report stale metadata, the open/read path forces revalidation.
         let mut file = match File::open(&path) {
             Ok(file) => file,
             Err(err) => {
@@ -612,8 +577,7 @@ fn read_journals(
         if start > 0 {
             let _ = file.seek(SeekFrom::Start(start));
         }
-        // Stream line by line: a long editing session can produce a large
-        // journal, and only the new tail is interesting after the first read.
+        // stream line by line: only the new tail matters after the first read.
         let mut reader = BufReader::new(file);
         let mut consumed = 0u64;
         loop {
@@ -629,8 +593,7 @@ fn read_journals(
                 break;
             }
             if line.last() != Some(&b'\n') {
-                // Incomplete tail: leave it unconsumed so a later complete
-                // version of the file is read from the right offset.
+                // partial tail: leave it for the next read.
                 break;
             }
             consumed += read as u64;
@@ -762,12 +725,10 @@ fn read_checkpoints(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Checkpoint writer
-// ---------------------------------------------------------------------------
+// checkpoint writer
 
-/// Write a full-state checkpoint owned by this device. Immutable once written,
-/// so replication never needs to merge two versions of the same file.
+/// write a full-state checkpoint owned by this device; immutable once written
+/// so replication never has two versions to merge.
 pub fn write_checkpoint(dir: &Path, device: &str, state: &MergeState) -> Result<Option<PathBuf>> {
     if state.is_empty() {
         return Ok(None);
@@ -800,7 +761,6 @@ pub fn write_checkpoint(dir: &Path, device: &str, state: &MergeState) -> Result<
     Ok(Some(path))
 }
 
-/// write a checkpoint, then trim the journal tail it covers
 pub fn write_checkpoint_and_trim(
     checkpoint_dir: &Path,
     journal_dir: &Path,
@@ -842,9 +802,7 @@ fn prune_own_checkpoints(dir: &Path, device: &str, keep: usize) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// tests
 
 #[cfg(test)]
 mod tests {
@@ -886,7 +844,6 @@ mod tests {
 
         assert_eq!(left.nodes[&id].rev, right.nodes[&id].rev);
         let winner = left.nodes[&id].node.clone().unwrap();
-        // Replaying the winning op changes nothing.
         let rev = left.nodes[&id].rev.clone();
         assert!(!left.merge(id, rev, false, Some(winner.clone())));
         assert_eq!(left.nodes[&id].node.clone().unwrap(), winner);
@@ -967,7 +924,6 @@ mod tests {
         assert_eq!(state.nodes[&id].node.as_ref().unwrap().x, 2.0);
         assert!(conflict.exists(), "conflict copies are never deleted");
 
-        // A second pass is a no-op.
         let changes = read_project(&root, &mut state, &mut marks).unwrap();
         assert!(changes.is_empty());
         let _ = std::fs::remove_dir_all(root);
@@ -1035,7 +991,6 @@ mod tests {
         let b_file = b_journal.path().to_path_buf();
         drop(b_journal);
 
-        // Deliver in both directions (and at all, in either order).
         std::fs::copy(&a_file, b_dir.join(a_file.file_name().unwrap())).unwrap();
         std::fs::copy(&b_file, a_dir.join(b_file.file_name().unwrap())).unwrap();
 
@@ -1272,7 +1227,7 @@ mod tests {
                 .unwrap();
             drop(journal);
             first_line = std::fs::read(&path).unwrap();
-            // Simulate a replicated file that was scanned mid-write.
+            // replicated file scanned mid-write.
             let mut bytes = first_line.clone();
             bytes.extend_from_slice(br#"{"v":1,"device":"dev""#);
             std::fs::write(&path, bytes).unwrap();
@@ -1281,7 +1236,7 @@ mod tests {
         assert_eq!(state.nodes.len(), 1);
         assert_eq!(state.nodes[&id].node.as_ref().unwrap().x, 7.0);
 
-        // The source finishes and the complete file replaces the partial copy.
+        // source finishes, complete file replaces the partial copy.
         let second = Uuid::now_v7();
         let batch = Batch {
             v: wire_version(),

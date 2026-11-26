@@ -1,22 +1,5 @@
-//! The system clipboard (X11 + Wayland + macOS + Windows).
-//!
-//! Ctrl+C writes the selected images there as a flattened PNG ("what you see
-//! is what you copy"; see `canvas::export`), Ctrl+V reads whatever it holds:
-//! image data (screenshots, browsers, image editors, …), files copied in a file
-//! manager (`text/uri-list`), or paths copied as text.
-//!
-//! A copy made *inside* refcanvas also remembers each image's placement
-//! (rotation, flips, size, z) keyed by the exported pixels' hash. The system
-//! clipboard itself only carries pixels, so this local history is what lets a
-//! round-trip paste keep the transform instead of landing axis-aligned.
-//!
-//! `arboard` handles both display servers: on Wayland it speaks the
-//! data-control protocol (`wl-copy`/`wl-paste`) and falls back to X11
-//! (Xwayland) when the compositor doesn't offer it; on X11 it owns the
-//! selection through its own server thread. One `arboard::Clipboard` handle
-//! is kept alive for the app's lifetime, on X11 the data is only served
-//! while some handle exists, and the slow parts (decoding, PNG encoding,
-//! blocking selection reads) run on worker threads.
+//! system clipboard: copy the selection as a flattened png, paste images or files.
+//! in-app copies remember placement via a pixel fingerprint; slow work runs on workers.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -28,21 +11,19 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use crate::canvas::export::{self, ExportNode};
 use crate::project::import::{self, ImportQueue, PastedPlacement};
 
-/// How many copied images are remembered for metadata restoration.
+/// how many copied images keep their placement.
 const COPY_HISTORY: usize = 16;
-/// Side of the square fingerprint used to recognise our own copy after the
-/// system re-encodes it. Exact hashes do not survive a clipboard round-trip
-/// (macOS converts through TIFF, for example), so compare a coarse image.
+/// coarse sample side; exact hashes don't survive a clipboard round-trip
+/// (macos re-encodes through tiff, for one).
 const FINGERPRINT_SIDE: u32 = 12;
-/// Mean per-channel difference (0-255) still accepted as "the same image".
+/// mean per-channel difference still accepted as the same image.
 const FINGERPRINT_TOLERANCE: u32 = 10;
 
-/// Placement recorded for a copy, keyed by the pixels it produced.
+/// placement recorded for a copy, keyed by the pixels it produced.
 #[derive(Clone, Debug)]
 struct CopyPayload {
-    /// World size of the flattened image. Rotation, crop and flips are baked
-    /// into the exported pixels by `export::flatten`, so only the display size
-    /// (and stacking order) may be restored without applying them twice.
+    /// world size of the flattened image; rotation, crop and flips are already
+    /// baked into the pixels, so only size and z are restored.
     size: [f32; 2],
     z: f32,
 }
@@ -58,30 +39,25 @@ impl Plugin for ClipboardPlugin {
 
 #[derive(Resource, Default)]
 pub struct SystemClipboard {
-    /// Long-lived handle: keeps arboard's X11 selection server alive, and
-    /// warms up the connection so the first Ctrl+C/V isn't slower.
+    /// long-lived handle: x11 only serves the selection while one exists.
     conn: Option<arboard::Clipboard>,
-    /// In-flight Ctrl+C export (decode → flatten → PNG).
+    /// in-flight ctrl+c export (decode → flatten → png).
     copy: Option<Task<Option<(Fingerprint, CopyPayload)>>>,
-    /// In-flight Ctrl+V read.
+    /// in-flight ctrl+v read.
     paste: Option<Task<PastePayload>>,
-    /// Where the in-flight paste should land (world space, captured at the
-    /// keypress so a slow read doesn't move it).
+    /// world point captured at the keypress, so a slow read doesn't move it.
     paste_at: Vec2,
-    /// Recent in-app copies, keyed by a coarse visual fingerprint.
-    /// A paste whose pixels match gets its transform back.
+    /// recent in-app copies keyed by a coarse fingerprint.
     history: VecDeque<(Fingerprint, CopyPayload)>,
 }
 
 impl SystemClipboard {
-    /// True while a copy/paste worker is still running: the loop must keep
-    /// ticking (`main.rs::idle_throttle`) so `poll_copy`/`poll_paste` can
-    /// collect the result promptly.
+    /// true while a worker runs; the idle loop must keep ticking to collect it.
     pub fn is_active(&self) -> bool {
         self.copy.is_some() || self.paste.is_some()
     }
 
-    /// Open (once) and reuse the persistent clipboard handle.
+    /// open once and reuse the persistent handle.
     fn connection(&mut self) -> Option<&mut arboard::Clipboard> {
         if self.conn.is_none() {
             match arboard::Clipboard::new() {
@@ -93,21 +69,20 @@ impl SystemClipboard {
     }
 }
 
-/// What a clipboard read found, in paste-priority order.
+/// what a clipboard read found, in paste-priority order.
 enum PastePayload {
     Files(Vec<PathBuf>),
     Image(image::RgbaImage),
     Empty,
 }
 
-/// Ctrl+C: copy the selected images to the system clipboard as one PNG.
-/// Returns immediately, decoding/encoding runs on a worker.
+/// ctrl+c: copy the selection as one flattened png; encoding runs on a worker.
 pub fn copy_selection(sc: &mut SystemClipboard, nodes: Vec<ExportNode>) {
     sc.connection();
     if nodes.is_empty() || sc.copy.is_some() {
         return;
     }
-    // Record placement now, on the main thread; the worker only touches pixels.
+    // record placement on the main thread; the worker only touches pixels.
     let payload = CopyPayload::from_export(&nodes);
     let task = AsyncComputeTaskPool::get().spawn(async move {
         match export::flatten(&nodes) {
@@ -143,7 +118,7 @@ impl CopyPayload {
     }
 }
 
-/// A tiny sampled copy of the image, robust to the platform's re-encoding.
+/// tiny sampled copy of the image, robust to platform re-encoding.
 #[derive(Clone, Debug)]
 struct Fingerprint {
     size: [u32; 2],
@@ -168,9 +143,8 @@ impl Fingerprint {
         }
     }
 
-    /// Same dimensions and a very similar picture. Comparing samples keeps
-    /// the match stable across clipboard re-encodes without risking a false
-    /// positive from a completely different image.
+    /// same dimensions and a very similar picture; samples survive re-encoding
+    /// without matching a completely different image.
     fn matches(&self, other: &Self) -> bool {
         if self.size != other.size || self.samples.len() != other.samples.len() {
             return false;
@@ -186,8 +160,7 @@ impl Fingerprint {
     }
 }
 
-/// Ctrl+V: read the clipboard on a worker; [`poll_paste`] imports the result
-/// at `at` (world space).
+/// ctrl+v: read the clipboard on a worker; poll_paste imports it at `at`.
 pub fn request_paste(sc: &mut SystemClipboard, at: Vec2) {
     sc.connection();
     if sc.paste.is_some() {
@@ -246,8 +219,8 @@ fn poll_paste(mut sc: ResMut<SystemClipboard>, mut queue: ResMut<ImportQueue>) {
     }
 }
 
-/// Put an RGBA image on the clipboard. Runs on a worker: arboard encodes it
-/// as PNG, and on Wayland spawns the serving thread.
+/// put an rgba image on the clipboard; worker-side because arboard encodes png
+/// and may need a serving thread on wayland.
 fn set_image(img: image::RgbaImage) {
     let (w, h) = img.dimensions();
     let mut cb = match arboard::Clipboard::new() {
@@ -268,8 +241,7 @@ fn set_image(img: image::RgbaImage) {
     }
 }
 
-/// Worker: whatever the clipboard offers, preferring files (a manager copy)
-/// over raw image data over text that names existing files.
+/// worker: files first, then raw image, then text naming existing files.
 fn read_clipboard() -> PastePayload {
     let mut cb = match arboard::Clipboard::new() {
         Ok(cb) => cb,
@@ -279,7 +251,7 @@ fn read_clipboard() -> PastePayload {
         }
     };
 
-    // Files copied in a file manager (Dolphin, Nautilus, Nemo, Thunar, …).
+    // files copied in a file manager.
     if let Ok(paths) = cb.get().file_list() {
         let files = clean_paths(paths);
         if !files.is_empty() {
@@ -287,8 +259,6 @@ fn read_clipboard() -> PastePayload {
         }
     }
 
-    // Raw image data (screenshots, "Copy image" in a browser, image editors, …).
-    // Raw image data (screenshots, "Copy image" in a browser, image editors, …).
     match cb.get_image() {
         Ok(img) => {
             let (w, h) = (img.width as u32, img.height as u32);
@@ -300,8 +270,7 @@ fn read_clipboard() -> PastePayload {
         Err(err) => trace!("clipboard: no image data ({err})"),
     }
 
-    // Last resort: text that names files ("Copy location", a path pasted
-    // into a text editor, …).
+    // last resort: text that names files ("copy location", pasted paths).
     if let Ok(text) = cb.get_text() {
         let files = clean_paths(
             text.lines()
@@ -318,7 +287,6 @@ fn read_clipboard() -> PastePayload {
     PastePayload::Empty
 }
 
-/// Turn the remembered copy into a placement at the paste point.
 fn placement_for(payload: Option<CopyPayload>) -> Option<PastedPlacement> {
     let payload = payload?;
     Some(PastedPlacement {
@@ -327,9 +295,8 @@ fn placement_for(payload: Option<CopyPayload>) -> Option<PastedPlacement> {
     })
 }
 
-/// Keep only paths that actually exist, and drop stray carriage returns:
-/// `text/uri-list` is CRLF-terminated on some desktops, while arboard only
-/// splits on `\n`, leaving the `\r` in the path.
+/// keep existing paths, dropping trailing `\r`: text/uri-list is CRLF on some
+/// desktops but arboard splits on `\n` only, leaving it in the path.
 fn clean_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     paths
         .into_iter()
@@ -393,8 +360,7 @@ mod tests {
 
     #[test]
     fn copied_size_matches_the_flattened_bounds() {
-        // A rotated image is flattened into its axis-aligned bounds, so the
-        // restore size must be the AABB, not the pre-rotation size.
+        // rotated images flatten to their aabb, so restore uses the aabb size.
         let node = export(Vec2::ZERO, Vec2::splat(100.0), std::f32::consts::FRAC_PI_4, 3.0);
         let payload = CopyPayload::from_export(&[node]);
         let expected = 100.0 * 2.0_f32.sqrt();

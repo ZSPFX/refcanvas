@@ -1,8 +1,5 @@
-//! Per-machine local state: identity, camera, merged-state cache and cleanup.
-//!
-//! None of this lives in the project folder. Two artists sharing a project keep
-//! separate camera positions and separate caches, and panning never produces
-//! shared-folder writes.
+//! per-machine local state: identity, camera, merged-state cache and cleanup,
+//! kept outside the project folder so artists have separate views and caches.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,8 +31,8 @@ pub fn projects_root() -> Option<PathBuf> {
     data_root().map(|root| root.join("projects"))
 }
 
-/// Stable per-installation identity. Stored outside the project folder so two
-/// machines never share one clock or one device id.
+/// stable per-installation identity: outside the project folder, so machines
+/// never share a clock or device id.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct DeviceFile {
     id: String,
@@ -133,9 +130,7 @@ pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Window preferences
-// ---------------------------------------------------------------------------
+// window preferences
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct UiPrefs {
@@ -170,20 +165,17 @@ pub fn save_always_on_top(on_top: bool) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Project path key
-// ---------------------------------------------------------------------------
+// project path key
 
-/// Canonical absolute path used as the local-state identity. Keeping the
-/// original string in the metadata file makes a hash collision detectable.
+/// canonical absolute path used as local-state identity. keeping the original
+/// string in metadata makes a hash collision detectable.
 pub fn canonical_root(root: &Path) -> String {
     let canonical = std::fs::canonicalize(root)
         .or_else(|_| std::path::absolute(root))
         .unwrap_or_else(|_| root.to_path_buf());
     let canonical: PathBuf = canonical.components().collect();
     let text = canonical.to_string_lossy().into_owned();
-    // Case-insensitive filesystems (NTFS, and APFS by default) must map every
-    // spelling of a path to one local-state entry.
+    // case-insensitive filesystems must map every spelling to one entry.
     #[cfg(any(windows, target_os = "macos"))]
     let text = {
         let mut text = text;
@@ -231,9 +223,7 @@ fn touch_meta(root: &Path, dir: &Path) {
     write_meta(dir, &meta);
 }
 
-// ---------------------------------------------------------------------------
-// Cached merged state
-// ---------------------------------------------------------------------------
+// cached merged state
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CachedState {
@@ -273,15 +263,13 @@ pub fn save_state(root: &Path, merge: &MergeState, files: &HashMap<String, FileM
     touch_meta(root, &dir);
 }
 
-/// Write a snapshot of local state on a worker thread. The journal is already
-/// durable, so a missed or slow cache write only costs replay time later.
+/// write local state on a worker thread; the journal is already durable, so a
+/// missed or slow cache only costs replay.
 pub fn save_state_async(root: PathBuf, merge: MergeState, files: HashMap<String, FileMark>) {
     std::thread::spawn(move || save_state(&root, &merge, &files));
 }
 
-// ---------------------------------------------------------------------------
-// Camera
-// ---------------------------------------------------------------------------
+// camera
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ViewState {
@@ -323,11 +311,8 @@ pub fn save_view(root: &Path, center: DVec2, log_scale: f64) {
     touch_meta(root, &dir);
 }
 
-// ---------------------------------------------------------------------------
-// Cleanup
-// ---------------------------------------------------------------------------
+// cleanup
 
-/// Drop local state for a project that no longer exists.
 #[allow(dead_code)]
 pub fn forget_project(root: &Path) {
     if let Some(dir) = project_dir(root) {
@@ -335,9 +320,8 @@ pub fn forget_project(root: &Path) {
     }
 }
 
-/// Remove local state whose project folder has been gone for longer than
-/// `grace`. A missing folder can simply mean an unmounted drive or an offline
-/// network share, so nothing is deleted on first sight.
+/// remove local state once its folder has been gone for `grace`; a missing
+/// folder may just be an unmounted drive, so nothing is dropped on first sight.
 pub fn sweep_missing(grace: Duration) {
     let Some(projects) = projects_root() else {
         return;

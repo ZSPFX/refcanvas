@@ -1,8 +1,5 @@
-//! Startup update check.
-//!
-//! One background request per launch. The result is polled from the main loop;
-//! a newer release shows a native dialog, and declining it leaves a badge in
-//! the status bar. Nothing is downloaded or installed automatically.
+//! startup update check: one background request per launch. a newer release
+//! prompts natively; declining leaves a badge. nothing installs itself.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,8 +27,7 @@ impl Plugin for UpdatePlugin {
     }
 }
 
-/// Update availability, and the badge shown while the running version is older
-/// than the latest release.
+/// update availability and the badge shown while running an older version.
 #[derive(Resource, Default)]
 pub struct UpdateStatus {
     pub latest: Option<Version>,
@@ -42,8 +38,7 @@ pub struct UpdateStatus {
 }
 
 impl UpdateStatus {
-    /// The yellow status label, or `None` when the app is up to date or no
-    /// newer release is known.
+    /// yellow status label, or none when up to date or no newer release known.
     pub fn badge_text(&self) -> Option<String> {
         if !self.declined {
             return None;
@@ -193,8 +188,7 @@ fn poll_check(mut status: ResMut<UpdateStatus>, mut dialogs: NonSendMut<Dialogs>
         status.prompted_this_run = true;
         status.stored.prompted_version = Some(latest_text);
         status.stored.save();
-        // The dialog is native and asynchronous: the answer arrives in
-        // `answer_prompt` while the app keeps rendering.
+        // native async dialog: the answer arrives in answer_prompt.
         dialogs.ask(
             "Update available",
             prompt_text(&latest),
@@ -208,7 +202,6 @@ fn poll_check(mut status: ResMut<UpdateStatus>, mut dialogs: NonSendMut<Dialogs>
     }
 }
 
-/// Handle the user's answer to the update prompt.
 fn answer_prompt(
     mut status: ResMut<UpdateStatus>,
     mut results: ResMut<DialogResults>,
@@ -217,9 +210,8 @@ fn answer_prompt(
     let answers: Vec<(MessageId, rfd::MessageDialogResult)> = std::mem::take(&mut results.messages);
     for (id, answer) in answers {
         let MessageId::UpdateAvailable { version, url } = id;
-        // Both answers leave the badge up: opening the release page does not
-        // install anything, and the running version is still old until the
-        // user replaces it. The badge clears by itself once the app is updated.
+        // both answers acknowledge; opening the page installs nothing, and the
+        // badge clears by itself once the app is updated.
         if matches!(answer, rfd::MessageDialogResult::Yes) {
             open_url(&mut contexts, &url);
         }
@@ -297,9 +289,8 @@ mod tests {
         assert!(parse_tag("not-a-version").is_err());
     }
 
-    /// Build just enough status to exercise the badge rules. The running
-    /// version comes from Cargo.toml, so the test derives neighbours from it
-    /// instead of hard-coding release numbers.
+    /// build just enough status for the badge rules; neighbours derive from the
+    /// running version (Cargo.toml) instead of hard-coded releases.
     fn badge(latest: Option<&str>, acknowledged: bool) -> Option<String> {
         let status = UpdateStatus {
             latest: latest.and_then(|v| Version::parse(v).ok()),
@@ -316,11 +307,8 @@ mod tests {
         let same = current.to_string();
         let older = format!("{}.{}.{}", current.major, current.minor, current.patch.saturating_sub(1));
 
-        // Newer + acknowledged (Yes or No both acknowledge) -> badge.
         assert!(badge(Some(&newer), true).is_some_and(|text| text.contains(&newer)));
-        // Newer but not acknowledged -> no badge yet.
         assert_eq!(badge(Some(&newer), false), None);
-        // Same or older version -> no badge, even if a stale entry exists.
         assert_eq!(badge(Some(&same), true), None);
         assert_eq!(badge(Some(&older), true), None);
         assert_eq!(badge(None, true), None);

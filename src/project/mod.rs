@@ -1,4 +1,4 @@
-//! Project data: on-disk store, operation journals, tabs, import pipeline.
+//! project data: on-disk store, operation journals, tabs, import pipeline.
 
 pub mod import;
 pub mod local;
@@ -55,9 +55,8 @@ impl Plugin for ProjectPlugin {
 }
 
 fn configure_tab_switching(app: &mut App) {
-    // Restore the view before camera, LOD, and overlays use it this frame.
-    // Remote changes are merged before the scene resumes, but applied only
-    // once the pointer is idle.
+    // restore the view before camera/lod/overlays read it this frame; remote
+    // changes merge before the scene resumes but apply only when the pointer is idle.
     app.add_systems(
         Update,
         (

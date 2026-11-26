@@ -1,12 +1,5 @@
-//! Where a project's data lives on disk.
-//!
-//! ```text
-//! <root>/
-//!   journal/       append-only canvas operations (shared, one writer per file)
-//!   checkpoints/   immutable full-state snapshots (shared, one writer per file)
-//!   images/        originals, copied on import (content-hash dedup)
-//!   cache/         generated previews (regenerated on demand)
-//! ```
+//! project folder layout: `journal/` one-writer ops, `checkpoints/` immutable
+//! snapshots, `images/` content-hash originals, `cache/` generated previews.
 
 use bevy::prelude::*;
 use std::path::PathBuf;

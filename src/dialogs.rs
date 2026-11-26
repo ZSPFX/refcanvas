@@ -1,16 +1,5 @@
-//! Native pickers and dialogs that never block the update loop.
-//!
-//! `rfd`'s synchronous pickers spin their own platform event loop. On macOS
-//! that is an AppKit run loop nested inside a Bevy tick, so the window stops
-//! painting until the dialog closes and the app looks frozen. The async
-//! variants return a future instead; this module polls it once per frame, so
-//! the app keeps rendering while the picker is open on every platform.
-//!
-//! The futures are polled by hand rather than spawned on a task pool: they
-//! must be driven on the platform's main thread, and a pool's local executor
-//! does not tick there. For the same reason [`Dialogs`] is a *non-send*
-//! resource: rfd's futures hold AppKit objects, and polling them from a
-//! worker thread can hang the process.
+//! native pickers that never block the loop: poll rfd's async futures by hand on
+//! the main thread (sync variants freeze rendering; they hold appkit objects).
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -21,14 +10,13 @@ use std::task::{Context, Poll, Wake, Waker};
 use bevy::prelude::*;
 use bevy::winit::WINIT_WINDOWS;
 
-/// Extensions the image pickers accept, matching `import::is_supported_image`.
+/// extensions the image pickers accept, matching `import::is_supported_image`.
 pub const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "bmp", "gif", "tga", "tif", "tiff",
 ];
-/// Title used by every image picker.
 pub const IMAGE_PICKER_TITLE: &str = "Import reference images";
 
-/// Which dialog a message result belongs to.
+/// which dialog a message result belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MessageId {
     UpdateAvailable { version: String, url: String },
@@ -36,13 +24,10 @@ pub enum MessageId {
 
 type BoxedFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
-/// Native dialogs requested by the app.
-///
-/// Non-send: see the module docs. Inserted with `init_non_send`,
-/// accessed through `NonSendMut`.
+/// native dialogs; non-send, see module docs.
 #[derive(Default)]
 pub struct Dialogs {
-    /// At most one dialog at a time: they are modal on every platform.
+    /// at most one dialog at a time: they are modal everywhere.
     active: Option<Active>,
 }
 
@@ -52,13 +37,8 @@ enum Active {
     Message(BoxedFuture<(MessageId, rfd::MessageDialogResult)>),
 }
 
-/// Attach the dialog to the Bevy window.
-///
-/// Without a parent, rfd guesses from `NSApp.mainWindow()`. When that lookup
-/// fails it prints "unsupported environment" and runs the panel as a blocking
-/// `runModal()`, which freezes the app. Passing the window keeps it an async
-/// sheet. The result is ignored on macOS when no window exists yet; the
-/// pickers then fall back to their own parent detection.
+/// attach the dialog to the bevy window; without a parent rfd may run it as a
+/// blocking `runModal()` and freeze the app.
 fn with_parent(dialog: rfd::AsyncFileDialog) -> rfd::AsyncFileDialog {
     WINIT_WINDOWS.with_borrow(|windows| match windows.windows.values().next() {
         Some(window) => dialog.set_parent(&**window),
@@ -73,7 +53,7 @@ fn message_with_parent(dialog: rfd::AsyncMessageDialog) -> rfd::AsyncMessageDial
     })
 }
 
-/// Finished dialog results, drained by the systems that act on them.
+/// finished dialog results, drained by the systems that act on them.
 #[derive(Resource, Default)]
 pub struct DialogResults {
     pub folders: Vec<PathBuf>,
@@ -82,12 +62,12 @@ pub struct DialogResults {
 }
 
 impl Dialogs {
-    /// True while a dialog is on screen, so callers do not stack another.
+    /// true while a dialog is on screen, so callers do not stack another.
     pub fn is_open(&self) -> bool {
         self.active.is_some()
     }
 
-    /// Show a folder picker. Ignored while another dialog is open.
+    /// show a folder picker; ignored while another dialog is open.
     pub fn pick_folder(&mut self, title: &str) {
         if self.is_open() {
             return;
@@ -103,12 +83,11 @@ impl Dialogs {
         self.active = Some(Active::Folder(Box::pin(future)));
     }
 
-    /// Show the standard image picker.
     pub fn pick_images(&mut self) {
         self.pick_files(IMAGE_PICKER_TITLE, IMAGE_EXTENSIONS);
     }
 
-    /// Show a multi-file picker filtered to the given extensions.
+    /// multi-file picker filtered to the given extensions.
     pub fn pick_files(&mut self, title: &str, extensions: &[&str]) {
         if self.is_open() {
             return;
@@ -135,7 +114,7 @@ impl Dialogs {
         self.active = Some(Active::Files(Box::pin(future)));
     }
 
-    /// Show a yes/no message box.
+    /// show a yes/no message box.
     pub fn ask(&mut self, title: &str, text: String, id: MessageId) {
         if self.is_open() {
             return;
@@ -194,8 +173,7 @@ fn poll_dialogs(mut dialogs: NonSendMut<Dialogs>, mut results: ResMut<DialogResu
     }
 }
 
-/// The dialog futures are re-polled every frame, so a waker that does nothing
-/// is enough and avoids waking the task pool for no reason.
+/// polled every frame, so a no-op waker is enough.
 struct NoopWake;
 
 impl Wake for NoopWake {
@@ -209,8 +187,7 @@ fn noop_waker() -> Waker {
     WAKER.clone()
 }
 
-/// The extension list as `&str`, borrowed from an owned vector so it can be
-/// handed to rfd from an async block.
+/// extension list as `&str` for the async block.
 fn filter_extensions(extensions: &[String]) -> Vec<&str> {
     extensions.iter().map(String::as_str).collect()
 }

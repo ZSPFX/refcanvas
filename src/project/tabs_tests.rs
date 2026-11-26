@@ -433,7 +433,7 @@ fn a_project_that_cannot_be_opened_is_not_added() {
     f.request(TabRequest::Switch(0));
     let bad = f.root.join("bad");
     std::fs::create_dir_all(&bad).unwrap();
-    // A regular file where a directory must be makes opening fail.
+    // a regular file where a directory belongs makes the open fail.
     std::fs::write(bad.join("journal"), b"not a directory").unwrap();
     f.request(TabRequest::Open(bad));
     assert_eq!(f.app.world().resource::<Tabs>().active_id(), Some(0));
@@ -460,7 +460,7 @@ fn tab_camera_matches_new_images_on_the_first_frame() {
             Projection::Orthographic(OrthographicProjection::default_2d()),
         ))
         .id();
-    // Give the second tab a camera position in local state before switching.
+    // second tab gets a camera position before switching.
     f.app.world_mut().resource_mut::<Tabs>().stored[1].view = (DVec2::new(12000.0, -8000.0), 5.0);
 
     f.request(TabRequest::Switch(0));
@@ -567,7 +567,7 @@ fn remote_edits_apply_without_echoing_a_local_op() {
         500.0
     );
 
-    // Applying remote state must not make the local diff emit it back.
+    // applying remote state must not make the local diff emit it back.
     let journal_path = f.app.world().resource::<Tabs>().stored[0]
         .journal
         .path()

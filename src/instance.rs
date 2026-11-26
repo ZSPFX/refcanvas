@@ -1,21 +1,17 @@
-//! Single-instance guard: only one refcanvas window may exist per user.
-//!
-//! `std::fs::File::try_lock` takes an exclusive `flock` on Unix and an
-//! exclusive `LockFileEx` on Windows. The lock belongs to the open file
-//! handle, so the OS releases it when the process exits, crashes, or is
-//! killed. There is no pid file to clean up.
+//! single-instance guard: one window per user. the lock belongs to the open
+//! file handle, so the os releases it on exit or crash; no pid file to clean up.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Keeps the single-instance lock alive. Dropping it releases the lock.
+/// keeps the lock alive; dropping it releases the lock.
 #[must_use = "dropping the guard releases the lock and allows another instance"]
 pub struct InstanceGuard {
     _lock: File,
 }
 
-/// True unless `REF_MULTIPLE_INSTANCES` is set to anything other than "0".
+/// true unless `REF_MULTIPLE_INSTANCES` is set to anything other than "0".
 pub fn enabled() -> bool {
     match std::env::var("REF_MULTIPLE_INSTANCES") {
         Ok(value) => value == "0",
@@ -23,10 +19,7 @@ pub fn enabled() -> bool {
     }
 }
 
-/// Try to become the only running instance.
-///
-/// `Ok(Some(_))` means this process owns the lock. `Ok(None)` means another
-/// instance is already running.
+/// ok(some) = this process owns the lock; ok(none) = another instance runs.
 pub fn acquire() -> io::Result<Option<InstanceGuard>> {
     acquire_at(&lock_path())
 }
@@ -42,7 +35,7 @@ fn acquire_at(path: &Path) -> io::Result<Option<InstanceGuard>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Write access is required by Windows `LockFileEx`.
+    // write access is required by windows `LockFileEx`.
     let file = OpenOptions::new()
         .create(true)
         .read(true)

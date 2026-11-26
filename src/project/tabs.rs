@@ -1,9 +1,5 @@
-//! Open projects as tabs, with session restore.
-//!
-//! One project = one folder containing append-only canvas journals,
-//! checkpoints, `images/` and `cache/`. Restored tabs load on first activation.
-//! Visited tabs keep hidden nodes and previews, with background work and undo
-//! history parked per tab.
+//! projects as tabs, with session restore: restored tabs load on first activation,
+//! visited tabs keep nodes, previews, background work and undo parked per tab.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,9 +26,8 @@ pub struct Tabs {
     pub(crate) stored: Vec<OpenTab>,
     pub(crate) active: usize,
     next_id: u64,
-    /// Project folders remembered from the session but not available yet
-    /// (offline network share, unmounted drive, sync still arriving). They are
-    /// retried in the background and preserved in `session.json`.
+    /// remembered roots not available yet (unmounted drive, offline share);
+    /// retried in the background and kept in `session.json`.
     pub(crate) unavailable: Vec<PathBuf>,
     pub(crate) clock: Clock,
 }
@@ -56,7 +51,7 @@ pub struct OpenTab {
     pub journal: Journal,
     pub merge: MergeState,
     pub files: HashMap<String, FileMark>,
-    /// Remote changes waiting for the pointer interaction to finish.
+    /// remote changes waiting for the pointer to go idle.
     pub pending: Vec<Change>,
     pub state: PersistenceState,
     pub state_dirty: bool,
@@ -64,7 +59,7 @@ pub struct OpenTab {
     pub loaded: bool,
     undo: UndoStack,
     imports: ImportQueue,
-    /// Camera center + log scale.
+    /// camera center and log scale.
     pub view: (DVec2, f64),
 }
 
@@ -86,12 +81,11 @@ impl Tabs {
         self.stored.is_empty()
     }
 
-    /// (id, name) for every open tab, in tab-bar order.
+    /// (id, name) per tab, in tab-bar order.
     pub fn summaries(&self) -> Vec<(u64, String)> {
         self.stored.iter().map(|t| (t.id, t.name.clone())).collect()
     }
 
-    /// Root folder of the tab with the given id.
     pub fn root_of(&self, id: u64) -> Option<PathBuf> {
         self.stored
             .iter()
@@ -112,12 +106,11 @@ pub struct TabRequests {
 }
 
 pub enum TabRequest {
-    /// Open (or create) the project rooted at this folder.
     Open(PathBuf),
-    /// Create a project in a folder that is not open yet: activates it even
-    /// when it is already a tab, so the picker always answers visibly.
+    /// open-new always activates, even when the folder is already a tab, so the
+    /// picker answers visibly.
     OpenNew(PathBuf),
-    /// Re-open a remembered project without changing the active tab.
+    /// re-open a remembered project without changing the active tab.
     OpenRestored(PathBuf),
     Close(u64),
     Switch(u64),
@@ -125,9 +118,7 @@ pub enum TabRequest {
     SaveNow,
 }
 
-// ---------------------------------------------------------------------------
-// Session (which tabs were open)
-// ---------------------------------------------------------------------------
+// session: which tabs were open
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct Session {
@@ -194,9 +185,7 @@ pub fn save_session(tabs: &Tabs) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Systems
-// ---------------------------------------------------------------------------
+// systems
 
 #[allow(clippy::too_many_arguments)]
 pub fn startup_tabs(
@@ -291,7 +280,7 @@ fn restore_session(
     save_session(tabs);
 }
 
-/// Handle shortcuts that manage tabs (Ctrl+T / Ctrl+O / Ctrl+W / Ctrl+Tab / Ctrl+S).
+/// tab shortcuts: Ctrl+T/O/W/Tab/S.
 pub fn tab_shortcuts(
     keys: Res<ButtonInput<KeyCode>>,
     mut contexts: EguiContexts,
@@ -364,7 +353,7 @@ pub fn process_requests(
     if requests.queue.is_empty() {
         return;
     }
-    // Apply deferred spawns before processing another switch or save.
+    // apply deferred spawns before another switch or save.
     let request = requests.queue.remove(0);
     let mut closing = None;
     let next = match request {
@@ -516,9 +505,7 @@ pub fn on_exit(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// helpers
 
 pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<OpenTab> {
     let store = ProjectStore {
@@ -603,7 +590,6 @@ fn ensure_loaded(
     Ok(())
 }
 
-/// Persist the active tab's nodes + camera.
 fn save_active(
     tabs: &mut Tabs,
     view: &View,
@@ -634,7 +620,6 @@ fn save_active(
     local::save_view(&tab.store.root, view.center, view.log_scale);
 }
 
-/// Apply the active tab's camera and node visibility.
 fn apply_active(
     tabs: &Tabs,
     view: &mut View,

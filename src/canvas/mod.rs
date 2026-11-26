@@ -1,4 +1,4 @@
-//! The canvas: camera/view control, dot grid, nodes, selection & interaction.
+//! the canvas: camera/view control, dot grid, nodes, selection & interaction.
 
 pub mod camera;
 pub mod cursor;
@@ -19,9 +19,8 @@ pub mod undo;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
-/// Remembers when each modifier was last active. Key chords can arrive split
-/// across frames (especially with synthetic input), so we accept a modifier
-/// that went up within the last few frames as part of a chord.
+/// last frame each modifier was seen; chords can arrive split across frames
+/// (especially synthetic input), so a modifier released within a few frames counts.
 #[derive(Resource, Default)]
 pub struct ChordMemory {
     ctrl_last: u64,
@@ -69,9 +68,8 @@ pub fn ctrl_down(keys: &ButtonInput<KeyCode>, mem: &ChordMemory, frame: u64) -> 
         || frame.saturating_sub(mem.ctrl_last) <= CHORD_GRACE_FRAMES
 }
 
-/// The platform's command modifier for shortcuts: Command on macOS, Control
-/// everywhere else. Drag modifiers (snapping/crop) keep using [`ctrl_down`]
-/// so they stay physical.
+/// platform command modifier for shortcuts: super under `cfg(target_os = "macos")`,
+/// control elsewhere. drag modifiers keep using [`ctrl_down`] so they stay physical.
 #[cfg(target_os = "macos")]
 pub fn command_down(keys: &ButtonInput<KeyCode>, mem: &ChordMemory, frame: u64) -> bool {
     keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight])
@@ -93,11 +91,11 @@ pub fn alt_down(keys: &ButtonInput<KeyCode>, mem: &ChordMemory, frame: u64) -> b
         || frame.saturating_sub(mem.alt_last) <= CHORD_GRACE_FRAMES
 }
 
-/// egui `Id` the tab bar publishes its on-screen rect under, so canvas input
-/// can ignore the pointer while it is over the bar.
+/// egui `Id` the tab bar publishes its rect under, so canvas input can ignore
+/// the pointer while it's over the bar.
 pub const TAB_BAR_RECT_ID: &str = "refcanvas_tabs_bar";
 
-/// True while egui is using the pointer (hovering UI, dragging a slider/menu…)
+/// true while egui is using the pointer (hovering ui, dragging a slider/menu…)
 /// or the pointer is over the tab bar.
 pub fn egui_pointer_busy(contexts: &mut EguiContexts) -> bool {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -106,15 +104,13 @@ pub fn egui_pointer_busy(contexts: &mut EguiContexts) -> bool {
     if ctx.egui_wants_pointer_input() {
         return true;
     }
-    // The bar sits on egui's background layer, which egui does not treat as an
-    // interactive area, so `egui_wants_pointer_input` lets presses on its
-    // padding fall through to the canvas. Gate on the bar's rect instead.
+    // the tab bar's padding isn't egui-interactive, so gate on its rect
     let pointer = ctx.input(|i| i.pointer.interact_pos());
     let bar = ctx.data_mut(|d| d.get_persisted::<egui::Rect>(egui::Id::new(TAB_BAR_RECT_ID)));
     matches!((pointer, bar), (Some(p), Some(r)) if r.contains(p))
 }
 
-/// True while egui should receive keyboard input (focused field etc.).
+/// true while egui should receive keyboard input (focused field etc.).
 pub fn egui_keyboard_busy(contexts: &mut EguiContexts) -> bool {
     contexts
         .ctx_mut()
@@ -122,11 +118,11 @@ pub fn egui_keyboard_busy(contexts: &mut EguiContexts) -> bool {
         .unwrap_or(false)
 }
 
-/// Interaction stage of the canvas (input, camera, selection), in order.
+/// interaction stage of the canvas (input, camera, selection), in order.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CanvasSet;
 
-/// Post-interaction stage (visibility culling, LOD, gizmos, grid), in order.
+/// post-interaction stage (culling, lod, gizmos, grid), in order.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CanvasLateSet;
 
@@ -172,10 +168,8 @@ impl Plugin for CanvasPlugin {
                     touch::apply_inertia,
                     camera::track_wheel_gesture,
                     camera::view_input,
-                    // Before `view_smooth`: focus/arrow hops must set their
-                    // target (and thus the ease's redraw request) within the
-                    // same frame, or the idle loop can go back to sleep
-                    // before the glide starts.
+                    // before `view_smooth`: focus/arrow hops must set their target
+                    // in the same frame, or the idle loop naps before the glide starts.
                     keyboard::shortcuts,
                     camera::view_smooth,
                     camera::track_view_motion,
@@ -210,14 +204,14 @@ impl Plugin for CanvasPlugin {
                     .in_set(CanvasLateSet)
                     .after(CanvasSet),
             )
-            // Cursor shapes run after egui's own cursor handling, so canvas
-            // cursors win over the canvas and egui's win over its UI.
+            // cursor shapes run after egui's, so canvas cursors win over the
+            // canvas and egui's win over its ui.
             .add_systems(
                 PostUpdate,
                 cursor::update_cursor.after(bevy_egui::EguiPostUpdateSet::PostProcessOutput),
             );
 
-        // Render-world half of the texture-upload bookkeeping (see
+        // render-world half of the texture-upload bookkeeping (see
         // `lod::GpuTextureState`); no-op without a render app.
         lod::register_gpu_texture_sync(app);
     }

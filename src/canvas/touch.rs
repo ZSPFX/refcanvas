@@ -1,7 +1,4 @@
-//! Touch input: one-finger pan, pinch zoom, and a pointer shared with the mouse.
-//!
-//! Windows touch arrives through winit (WM_POINTER / WM_TOUCH) as ordinary
-//! Bevy `TouchInput` messages, so no platform-specific code is needed.
+//! touch input: one-finger pan, pinch zoom, shared pointer path with the mouse.
 
 use std::time::{Duration, Instant};
 
@@ -17,41 +14,41 @@ use super::node::{InactiveTab, TabOwner};
 use super::selection::{self, Interaction, NodeQ, Selection, press_label};
 use crate::project::tabs::Tabs;
 
-/// Movement under this distance still counts as a tap, logical pixels.
+/// movement under this still counts as a tap, logical px.
 const TAP_SLOP_PX: f32 = 12.0;
-/// Longest press that still counts as a tap.
+/// longest press that still counts as a tap.
 const TAP_MAX: Duration = Duration::from_millis(450);
-/// Maximum delay between two taps.
+/// max delay between two taps.
 const DOUBLE_TAP_MAX: Duration = Duration::from_millis(350);
-/// Maximum distance between two taps, logical pixels.
+/// max distance between two taps, logical px.
 const DOUBLE_TAP_DIST_PX: f32 = 36.0;
-/// Movement before a touch becomes a node drag, logical pixels.
+/// movement before a touch becomes a node drag, logical px.
 pub const TOUCH_DRAG_THRESHOLD_PX: f32 = 8.0;
 
-/// Pan friction time constant, seconds.
+/// pan friction time constant (s).
 const PAN_TAU: f64 = 0.24;
-/// Zoom friction time constant, seconds.
+/// zoom friction time constant (s).
 const ZOOM_TAU: f64 = 0.18;
-/// How quickly the velocity estimate follows the finger.
+/// how fast the velocity estimate follows the finger.
 const VELOCITY_TAU: f32 = 0.045;
-/// Smallest release velocity that starts a fling.
+/// smallest release velocity that starts a fling.
 const PAN_START_MIN: f32 = 100.0;
-/// Pan speed at which the fling stops, logical px/s.
+/// pan speed at which the fling stops, logical px/s.
 const PAN_STOP: f32 = 20.0;
-/// Upper bound on the release pan speed, logical px/s.
+/// upper bound on release pan speed, logical px/s.
 const PAN_MAX: f32 = 6000.0;
-/// Smallest release zoom velocity that starts a fling.
+/// smallest release zoom velocity that starts a fling.
 const ZOOM_START_MIN: f64 = 0.10;
-/// Zoom speed at which the fling stops, log scale per second.
+/// zoom speed at which the fling stops, log scale/s.
 const ZOOM_STOP: f64 = 0.02;
-/// Upper bound on the release zoom speed, log scale per second.
+/// upper bound on release zoom speed, log scale/s.
 const ZOOM_MAX: f64 = 2.0;
-/// Time after the last real movement that still counts as a fling.
+/// time after the last real movement that still counts as a fling.
 const RELEASE_GRACE: Duration = Duration::from_millis(100);
-/// Zoom velocity decays this fast once a pinch falls back to one finger.
+/// zoom velocity decay once a pinch falls back to one finger.
 const HANDOFF_ZOOM_TAU: f64 = 0.10;
 
-/// Kinetic follow-through after a touch gesture.
+/// kinetic follow-through after a touch gesture.
 #[derive(Resource, Default)]
 pub struct Inertia {
     pan: Vec2,
@@ -77,24 +74,20 @@ impl Inertia {
     }
 }
 
-/// Primary canvas pointer, fed by the mouse or a single active touch.
-///
-/// The canvas systems read this instead of the mouse directly, so touch and
-/// mouse share one interaction path. While a touch is down the mouse is
-/// ignored, which also drops the mouse events Windows synthesizes from touch.
+/// primary canvas pointer; touch wins over mouse, including synthesized mouse events.
 #[derive(Resource, Default)]
 pub struct Pointer {
     pub screen: Option<Vec2>,
     pub pressed: bool,
     pub just_pressed: bool,
     pub just_released: bool,
-    /// This frame's input came from touch.
+    /// this frame's input came from touch.
     pub is_touch: bool,
-    /// A touch gesture is in progress (including the release frame).
+    /// a touch gesture is in progress (including the release frame).
     pub touch_active: bool,
-    /// The press is the second tap of a double tap.
+    /// press is the second tap of a double tap.
     pub double_tap: bool,
-    /// This touch press navigates the camera instead of editing a node.
+    /// touch press navigates the camera instead of editing a node.
     pub touch_pan: bool,
 }
 
@@ -107,7 +100,7 @@ enum Mode {
     Ignore,
 }
 
-/// Gesture state carried between frames.
+/// gesture state carried between frames.
 #[derive(Resource, Default)]
 pub struct TouchState {
     mode: Mode,
@@ -173,8 +166,8 @@ pub fn touch_input(
     pointer.double_tap = false;
     pointer.touch_pan = false;
 
-    // A canceled touch (focus loss, gesture stolen by the system) never sends
-    // an end event, so roll the drag back and drop the gesture.
+    // a canceled touch (focus loss, gesture stolen) never sends an end event;
+    // roll the drag back and drop the gesture.
     if touches.any_just_canceled() {
         selection::cancel_interaction(&mut interaction, &mut q);
         inertia.stop();
@@ -228,9 +221,8 @@ pub fn touch_input(
                     state.last_tap = None;
                 }
 
-                // A drag only edits an image after it was selected by a tap.
-                // Every other single-finger press navigates the camera. A tap
-                // that stops a fling also becomes a pan, so it cannot select.
+                // a drag edits an image only after a tap selected it; every other
+                // one-finger press pans. a tap that stops a fling becomes a pan.
                 let on_selected_node = hit.is_some_and(|(entity, _)| selection.contains(entity));
                 let pan = stopping || (!double_tap && !on_handle && !on_selected_node);
 
@@ -257,7 +249,7 @@ pub fn touch_input(
                 pointer.touch_pan = pan;
             }
             Mode::Single => {
-                // A second finger always means navigation, cancel edits.
+                // a second finger always means navigation, cancel edits.
                 state.mode = Mode::Multi;
                 state.secondary = Some(id);
                 state.last_mid = None;
@@ -306,8 +298,8 @@ pub fn touch_input(
                             state.last_motion = Some(now);
                         }
                     }
-                    // A pinch that fell back to one finger loses its zoom
-                    // momentum quickly; the remaining finger drives panning.
+                    // a pinch that fell back to one finger loses zoom momentum
+                    // quickly; the remaining finger drives panning.
                     state.zoom_velocity *= (-dt as f64 / HANDOFF_ZOOM_TAU).exp();
                 }
                 state.last_frame = Some(now);
@@ -318,7 +310,7 @@ pub fn touch_input(
                 }
                 if state.pan && state.moved {
                     if !was_moved {
-                        // Include the movement spent crossing the tap slop.
+                        // include the movement spent crossing the tap slop.
                         if let Some(start) = state.start {
                             view.pan_pixels(pos - start, wpp as f64);
                         }
@@ -426,7 +418,7 @@ pub fn touch_input(
                 state.last_tap = Some((now, state.start.unwrap_or(pos)));
             }
         }
-        // Only camera pans fling. Node drags and handle edits stay put.
+        // only camera pans fling; node drags and handle edits stay put.
         if state.pan {
             start_inertia(now, &state, &mut inertia);
         }
@@ -436,8 +428,8 @@ pub fn touch_input(
         state.reset();
     }
 
-    // Lifting one finger after a pinch hands the gesture back to the
-    // remaining finger as a pan, re-anchored so the view does not jump.
+    // lifting one finger after a pinch hands back to the remaining finger as a
+    // pan, re-anchored so the view doesn't jump.
     if state.mode == Mode::Multi {
         let mut current = touches.iter();
         if let (Some(touch), None) = (current.next(), current.next()) {
@@ -526,8 +518,7 @@ fn start_inertia(now: Instant, state: &TouchState, inertia: &mut Inertia) {
     }
 }
 
-/// Continue a released pan or pinch with browser-like friction. A new touch
-/// stops it immediately in `touch_input`.
+/// continue a released pan or pinch with friction; a new touch stops it in `touch_input`.
 pub fn apply_inertia(
     time: Res<Time>,
     camera: Single<(&Camera, &GlobalTransform)>,

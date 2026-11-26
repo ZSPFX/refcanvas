@@ -1,10 +1,5 @@
-//! The dot grid: one fullscreen-ish quad with a custom 2D material.
-//!
-//! The fragment shader reconstructs each fragment's world offset from its
-//! screen position and CPU-computed uniforms (all f64 on the CPU, so the grid
-//! stays pixel-stable far from the origin). Two dot lattices (fine and coarse,
-//! powers of two apart) cross-fade as you zoom, keeping the on-screen dot
-//! spacing comfortable without popping, the trick infinite canvases use.
+//! dot grid: one quad, shader rebuilds world offset from screen and f64 uniforms.
+//! two lattices a power of two apart cross-fade while zooming.
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -17,30 +12,27 @@ use crate::CANVAS_BG;
 
 pub struct GridPlugin;
 
-/// Where the grid shader is loaded from. Release builds bake it into the
-/// binary (registered by [`GridPlugin::build`]), so the exe ships standalone;
-/// dev builds read it from `assets/` so `.wesl` edits hot-reload.
+/// grid shader path: release builds embed it (registered by
+/// [`GridPlugin::build`]) so the exe ships standalone; dev reads `assets/` for hot reload.
 const GRID_SHADER: &str = if cfg!(debug_assertions) {
     "shaders/dot_grid.wesl"
 } else {
     "embedded://refcanvas/shaders/dot_grid.wesl"
 };
 
-/// Key the shader bytes are registered under in the `EmbeddedAssetRegistry`:
-/// [`GRID_SHADER`] minus the `embedded://` source prefix.
+/// registry key: [`GRID_SHADER`] minus the `embedded://` source prefix.
 #[cfg(not(debug_assertions))]
 const GRID_SHADER_EMBEDDED: &str = "refcanvas/shaders/dot_grid.wesl";
 
 impl Plugin for GridPlugin {
     fn build(&self, app: &mut App) {
-        // Release builds ship as a single file: embed the shader bytes in the
-        // exe. The registry shares its in-memory `Dir` with the `embedded`
-        // asset source, so `GRID_SHADER` resolves like any on-disk path.
+        // release ships as one file: embed the shader. the registry shares its
+        // in-memory dir with the `embedded` asset source, so the path resolves.
         #[cfg(not(debug_assertions))]
         app.world_mut()
             .resource_mut::<bevy::asset::io::embedded::EmbeddedAssetRegistry>()
             .insert_asset(
-                // Only used by the `embedded_watcher` feature (not enabled).
+                // only used by the `embedded_watcher` feature (not enabled).
                 std::path::PathBuf::new(),
                 std::path::Path::new(GRID_SHADER_EMBEDDED),
                 include_bytes!("../../assets/shaders/dot_grid.wesl"),
@@ -51,7 +43,7 @@ impl Plugin for GridPlugin {
     }
 }
 
-/// Grid dot visibility (0 = hidden), toggled with the G key.
+/// grid dot visibility (0 = hidden), toggled with g.
 #[derive(Resource)]
 pub struct GridFade(pub f32);
 
@@ -65,9 +57,9 @@ impl Default for GridFade {
 pub struct GridQuad;
 
 const GRID_Z: f32 = -1000.0;
-/// World-space grid spacing at 100% zoom (1 world unit = 1 logical px there).
+/// world-space grid spacing at 100% zoom (1 world unit = 1 logical px there).
 const BASE_SPACING: f64 = 10.0;
-/// Minimum on-screen dot spacing (logical px) before the grid subdivides.
+/// minimum on-screen dot spacing (logical px) before the grid subdivides.
 const MIN_SCREEN_SPACING: f64 = 14.0;
 const DOT_RADIUS_LOGICAL: f32 = 1.2;
 
@@ -77,24 +69,24 @@ pub struct GridMaterial {
     pub params: GridParams,
 }
 
-/// Must match `GridParams` in `assets/shaders/dot_grid.wesl` exactly.
+/// must match `GridParams` in `assets/shaders/dot_grid.wesl` exactly.
 #[derive(Debug, Clone, ShaderType)]
 pub struct GridParams {
-    /// World-lattice phase for the fine / coarse levels, in [0,1).
+    /// world-lattice phase for the fine / coarse levels, in [0,1).
     pub frac_a: Vec2,
     pub frac_b: Vec2,
-    /// Render target size, physical pixels.
+    /// render target size, physical pixels.
     pub viewport_px: Vec2,
     pub spacing_a: f32,
     pub spacing_b: f32,
-    /// World units per physical pixel.
+    /// world units per physical pixel.
     pub world_per_px: f32,
     pub dot_radius: f32,
     pub alpha_a: f32,
     pub alpha_b: f32,
     pub bg: Vec4,
     pub dot: Vec4,
-    /// Global fade (grid visibility toggle).
+    /// global fade (grid visibility toggle).
     pub fade: Vec4,
 }
 
@@ -155,9 +147,8 @@ pub fn update_grid(
     let physical = logical * dpi;
     let wpp_physical = wpp_logical / dpi;
 
-    // Choose the cross-faded lattice pair.
-    // v = 0 at "fine spacing exactly MIN_SCREEN_SPACING"; fractional part fades
-    // the fine level out while the coarse level fades in.
+    // choose the cross-faded lattice pair. v = 0 at "fine spacing exactly
+    // MIN_SCREEN_SPACING"; the fraction fades fine out while coarse fades in.
     let base_screen = BASE_SPACING / wpp_logical;
     let v = (MIN_SCREEN_SPACING / base_screen).log2();
     let frac = v - v.floor();
@@ -168,7 +159,7 @@ pub fn update_grid(
     let alpha_b = frac as f32;
 
     let frac_of = |spacing: f64| -> Vec2 {
-        // Phase of the world-lattice relative to the camera center.
+        // phase of the world lattice relative to the camera center.
         Vec2::new(
             (view.center.x / spacing).rem_euclid(1.0) as f32,
             (view.center.y / spacing).rem_euclid(1.0) as f32,
@@ -189,7 +180,7 @@ pub fn update_grid(
         ..default()
     };
 
-    // Size the quad to (slightly more than) the visible world area.
+    // size the quad to (slightly more than) the visible world area.
     let viewport_world = logical * wpp_logical * 1.02;
     quad_transform.translation.x = view.center.x as f32;
     quad_transform.translation.y = view.center.y as f32;
@@ -201,7 +192,7 @@ pub fn update_grid(
     }
 }
 
-/// sRGB → linear RGBA vector, matching what the renderer expects in shaders.
+/// sRGB → linear rgba, matching what shaders expect.
 pub fn linear(color: Color) -> Vec4 {
     let l = color.to_linear();
     Vec4::new(l.red, l.green, l.blue, l.alpha)

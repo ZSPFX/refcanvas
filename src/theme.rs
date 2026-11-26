@@ -1,24 +1,11 @@
-//! Accent color: follows the desktop theme when possible, KDE Plasma on
-//! Linux, the DWM accent on Windows.
-//!
-//! Sources, in order:
-//! 1. `REF_ACCENT=#RRGGBB` env override (handy for testing / non-KDE; keeps
-//!    the color fixed and disables the watcher below).
-//! 2. Windows: `HKCU\Software\Microsoft\Windows\DWM\AccentColor` (the swatch
-//!    picked in Settings → Personalization → Colors, "automatic" included).
-//!    Elsewhere `kdeglobals`: `[General] AccentColor` (Plasma 6 custom
-//!    accent), falling back to `[Colors:Selection] BackgroundNormal`
-//!    (Plasma 5, or a scheme without an explicit accent).
-//! 3. The built-in blue the app shipped with.
-//!
-//! The source is re-read about once a second, so changing the accent in
-//! System Settings updates the app live.
+//! accent color: `REF_ACCENT` override, else the desktop accent (dwm registry on
+//! windows, system defaults on macos, desktop config on linux), else fallback blue.
 
 use bevy::prelude::*;
 
 const FALLBACK: [f32; 3] = [0.05, 0.6, 1.0];
 
-/// The app's accent color, in sRGB 0..1 components.
+/// the app's accent color, srgb 0..1.
 #[derive(Resource, Clone, Copy, PartialEq)]
 pub struct Accent {
     rgb: [f32; 3],
@@ -39,19 +26,18 @@ impl Accent {
         self.rgb
     }
 
-    /// Opaque accent: selection outline, handle borders.
+    /// opaque accent: selection outline, handle borders.
     pub fn base(&self) -> Color {
         Color::srgb(self.rgb[0], self.rgb[1], self.rgb[2])
     }
 
-    /// Accent with an alpha: marquee outline/fill, tinted hovers.
+    /// accent with an alpha: marquee outline/fill, tinted hovers.
     pub fn alpha(&self, a: f32) -> Color {
         Color::srgba(self.rgb[0], self.rgb[1], self.rgb[2], a)
     }
 
-    /// True when the accent is light enough that dark text reads better on it.
-    /// Relative luminance (sRGB → linear); threshold picked so Breeze's
-    /// #3DAEE9 gets dark text while deeper blues keep white.
+    /// true when dark text reads better on it; relative luminance, threshold
+    /// tuned so mid-tone blues keep white text.
     pub fn is_light(&self) -> bool {
         let lin = |c: f32| {
             if c <= 0.04045 {
@@ -73,16 +59,15 @@ impl Plugin for ThemePlugin {
     }
 }
 
-/// Re-read the desktop accent about once a second; cheap (a 4 KB file that
-/// only changes when the theme changes).
+/// re-read the desktop accent about once a second; cheap.
 fn watch_desktop_accent(time: Res<Time>, mut accent: ResMut<Accent>, mut poll: Local<f32>) {
-    // A fixed `REF_ACCENT` wins over whatever the desktop says.
+    // a fixed override wins.
     if std::env::var_os("REF_ACCENT").is_some() {
         return;
     }
     *poll += time.delta_secs();
-    // macOS answers through `defaults`, which spawns a process. The accent
-    // rarely changes there, so poll it far less often than a config file read.
+    // macos answers through `defaults`, which spawns a process, so poll it
+    // far less often.
     #[cfg(target_os = "macos")]
     let interval = 15.0;
     #[cfg(not(target_os = "macos"))]
@@ -117,8 +102,7 @@ fn read_kde_accent() -> Option<[f32; 3]> {
     parse_kde_accent(&text)
 }
 
-/// The desktop's accent, per platform: Windows reads the DWM registry value,
-/// macOS the system accent defaults, everything else the KDE config.
+/// desktop accent: dwm registry on windows, defaults on macos, config elsewhere.
 #[cfg(target_os = "macos")]
 fn read_desktop_accent() -> Option<[f32; 3]> {
     read_macos_accent()
@@ -129,8 +113,7 @@ fn read_desktop_accent() -> Option<[f32; 3]> {
     read_kde_accent()
 }
 
-/// macOS stores the accent as `AppleAccentColor`: `-1` for graphite, `0..=7`
-/// for the palette from red to pink. A missing key means the default blue.
+/// `AppleAccentColor`: -1 graphite, 0..=7 palette, missing key = default blue.
 #[cfg(target_os = "macos")]
 fn read_macos_accent() -> Option<[f32; 3]> {
     let output = std::process::Command::new("defaults")
@@ -147,7 +130,7 @@ fn read_macos_accent() -> Option<[f32; 3]> {
 #[cfg(target_os = "macos")]
 const MACOS_ACCENT_BLUE: [f32; 3] = [0.0, 0.478, 1.0];
 
-/// The system accent palette, as 0-255 RGB.
+/// system accent palette as 0-255 rgb.
 #[cfg(target_os = "macos")]
 fn macos_accent_color(index: i32) -> Option<[f32; 3]> {
     let rgb: [u8; 3] = match index {
@@ -169,8 +152,7 @@ fn macos_accent_color(index: i32) -> Option<[f32; 3]> {
     ])
 }
 
-/// The DWM `AccentColor` DWORD (`0xAABBGGRR`; alpha ignored, the app applies
-/// its own).
+/// dwm `AccentColor` dword (0xAABBGGRR; alpha ignored).
 #[cfg(target_os = "windows")]
 fn read_desktop_accent() -> Option<[f32; 3]> {
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
@@ -238,7 +220,7 @@ fn parse_kde_accent(text: &str) -> Option<[f32; 3]> {
     accent.or(selection)
 }
 
-/// KDE writes colors as `R,G,B` (0-255).
+/// config writes colors as `R,G,B` (0-255).
 #[cfg(not(target_os = "windows"))]
 fn parse_rgb_csv(value: &str) -> Option<[f32; 3]> {
     let mut parts = value.split(',');

@@ -1,4 +1,4 @@
-//! Selection state and the pointer interaction state machine.
+//! selection state and the pointer interaction state machine.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -14,15 +14,13 @@ use super::touch::{Pointer, TOUCH_DRAG_THRESHOLD_PX};
 use super::undo::{UndoEntry, UndoStack, snapshot_of};
 use crate::project::tabs::Tabs;
 
-/// Chord-modifier state, grouped so `pointer_events` stays within Bevy's
-/// 16-parameter system limit.
+/// grouped modifiers so `pointer_events` stays under the 16-param system limit
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct Chords<'w> {
     pub mem: Res<'w, crate::canvas::ChordMemory>,
     pub frame: Res<'w, super::lod::FrameCounter>,
 }
 
-/// Query shape shared by all node-manipulating systems.
 pub type NodeQ<'w, 's> = Query<
     'w,
     's,
@@ -35,17 +33,15 @@ pub type NodeQ<'w, 's> = Query<
     Without<InactiveTab>,
 >;
 
-/// Minimum node size when scaling, logical pixels.
+/// min scale size, logical px
 pub const MIN_SIZE_PX: f32 = 6.0;
-/// Click/drag threshold for starting a move, logical pixels.
+/// click/drag threshold, logical px
 const MOVE_THRESHOLD_PX: f32 = 3.0;
-/// Pointer travel (logical px) before a marquee drag affects selection.
-/// Below it the gesture is a click, and a click must not select through the
-/// AABB "gaps" of a rotated node (see `hit::rect_overlaps_pose`).
+/// travel before a marquee affects selection; below it a click, which must not
+/// select through the aabb gaps of rotated nodes.
 const MARQUEE_THRESHOLD_PX: f32 = 4.0;
-/// Only nodes within this many logical px outside the viewport can snap:
-/// aligning to something you can't see (with a guide that would run far
-/// off-screen) is just noise.
+/// snap candidates must be within this many logical px of the viewport; aligning
+/// to unseen nodes is just noise.
 const SNAP_FALLOFF_PX: f32 = 120.0;
 
 #[derive(Resource, Default)]
@@ -67,20 +63,19 @@ impl Selection {
 pub enum Interaction {
     #[default]
     Idle,
-    /// LMB pressed on a node: becomes a Move once past the threshold.
+    /// pressed on a node; becomes Move past the threshold
     PendingMove {
         press_screen: Vec2,
         start_world: Vec2,
         snapshots: Vec<(Entity, NodeSnapshot)>,
-        /// Shift+press on an already-selected node: dragging moves the whole
-        /// selection with Shift's axis lock, but a click with no drag is a
-        /// shift-click, on release the node goes back out of the selection.
+        /// shift+press on a selected node: drag moves the selection, a click
+        /// with no drag removes it again on release.
         toggle_off: Option<Entity>,
     },
     Move {
         start_world: Vec2,
         snapshots: Vec<(Entity, NodeSnapshot)>,
-        /// Live alignment guides (line + involved boxes) drawn by the overlay.
+        /// live guides drawn by the overlay
         guide_x: Option<super::snap::SnapGuide>,
         guide_y: Option<super::snap::SnapGuide>,
     },
@@ -121,8 +116,8 @@ impl Interaction {
     }
 }
 
-/// Snapshot set for a drag: the selection, plus images contained by any
-/// selected frame (dragging a frame drags its contents).
+/// selection plus images inside selected frames: dragging a frame drags
+/// its contents.
 pub fn drag_snapshots(q: &NodeQ, selection: &Selection) -> Vec<(Entity, NodeSnapshot)> {
     let mut snapshots = gather_snapshots(q, &selection.nodes);
     let frames: Vec<Pose> = snapshots
@@ -167,7 +162,7 @@ pub fn selection_frame_of(q: &NodeQ, selection: &Selection) -> Option<Pose> {
     manipulate::selection_frame(&poses)
 }
 
-/// Filter for entities belonging to the active tab.
+/// active-tab filter; `None` keeps everything
 pub fn owner_filter<'a>(
     active: Option<u64>,
     q_own: &'a Query<(Entity, &TabOwner), Without<InactiveTab>>,
@@ -195,8 +190,7 @@ pub fn pick_topmost(
     for (e, _) in items {
         if let Ok((_, tf, _, node)) = q.get(e) {
             let pose = current_pose(tf, node);
-            // A frame's label is chrome sitting outside its body: treat a
-            // click on the text as a click on the frame.
+            // label is chrome outside the body: a click on it hits the frame
             let on_label = label_hits
                 .get(e)
                 .is_some_and(|label| hit::point_inside(cursor_world, label));
@@ -208,7 +202,7 @@ pub fn pick_topmost(
     None
 }
 
-/// Handle a press on a frame label. Returns true if it started a rename.
+/// returns true if it started a rename
 pub fn press_label(
     entity: Entity,
     cursor_world: Vec2,
@@ -241,17 +235,16 @@ pub fn press_label(
     false
 }
 
-/// World rect of the camera's view, grown by the snap falloff band.
+/// camera view grown by the snap falloff band
 fn snap_view_rect(window: &Window, camera: &Camera, cam_tf: &GlobalTransform, wpp: f32) -> Rect {
     match super::camera::visible_world_rect(camera, cam_tf, window.size()) {
         Some(view) => view.inflate(SNAP_FALLOFF_PX * wpp),
-        // No projection: don't range-limit snapping.
+        // no projection: don't range-limit snapping.
         None => Rect::from_corners(Vec2::splat(f32::MIN), Vec2::splat(f32::MAX)),
     }
 }
 
-/// Candidate snap rects: active-tab nodes that overlap the (falloff-grown)
-/// camera view and are not part of the drag.
+/// non-dragged active-tab nodes overlapping the falloff-grown view
 fn snap_candidates(
     q: &NodeQ,
     q_own: &Query<(Entity, &TabOwner), Without<InactiveTab>>,
@@ -291,8 +284,7 @@ pub fn pointer_events(
     let egui_busy = egui_pointer_busy(&mut contexts);
 
     if pointer.just_released {
-        // A Shift press that never became a drag is a Shift click: toggle the
-        // pressed node back out of the selection (dragging moves it instead).
+        // shift press that never dragged is a shift-click: toggle it back out
         let toggle = match &*interaction {
             Interaction::PendingMove {
                 toggle_off: Some(e),
@@ -303,7 +295,7 @@ pub fn pointer_events(
         if let Some(e) = toggle {
             selection.nodes.retain(|n| *n != e);
         }
-        // Commit a transform edit to the undo stack if anything moved.
+        // commit the edit if anything moved
         if let Some(snaps) = interaction.snapshots() {
             let mut items = Vec::new();
             for (e, before) in snaps {
@@ -327,7 +319,7 @@ pub fn pointer_events(
     let shift = crate::canvas::shift_down(&keys, &chords.mem, chords.frame.0);
     let alt = crate::canvas::alt_down(&keys, &chords.mem, chords.frame.0);
     if !pointer.is_touch && keys.pressed(KeyCode::Space) {
-        return; // Space+LMB is pan navigation
+        return; // space+lmb pans
     }
 
     let (camera, cam_tf) = *camera;
@@ -339,10 +331,8 @@ pub fn pointer_events(
     };
     let wpp = world_per_logical_px(camera, cam_tf).unwrap_or(1.0) as f32;
 
-    // 1) Handles of the current selection.
-    // A frame label under the pointer wins over the handles it overlaps: the
-    // text is frame chrome, meant to be grabbed to move the frame (otherwise
-    // the first glyphs would start a resize/rotate from the top-left corner).
+    // a label under the pointer wins over overlapping handles, so grabbing the
+    // text moves the frame instead of resizing from the top-left corner.
     let on_selected_label = selection.nodes.iter().any(|e| {
         label_hits
             .get(*e)
@@ -361,22 +351,19 @@ pub fn pointer_events(
                 let ctrl = crate::canvas::ctrl_down(&keys, &chords.mem, chords.frame.0);
                 match kind {
                     HitKind::Corner(_) | HitKind::Edge(_) => {
-                        // Resize transforms the selection only: a frame
-                        // resizes without scaling the images inside. To resize
-                        // them together, marquee-select the frame *and* its
-                        // contents, everything selected scales as a group.
+                        // resize transforms the selection only; a frame resizes
+                        // without its contents. marquee the frame *and* images to scale both.
                         let snapshots = gather_snapshots(&q, &selection.nodes);
-                        // Ctrl + drag on a single image = precise crop (trim
-                        // the visible region without rescaling). Evaluated
-                        // live, so Ctrl can also be pressed mid-drag.
+                        // ctrl+drag on one image = precise crop; read live, so ctrl
+                        // can also be pressed mid-drag.
                         let crop_eligible = snapshots.len() == 1
                             && snapshots
                                 .first()
                                 .and_then(|(e, _)| q.get(*e).ok())
                                 .map(|(_, _, _, n)| n.image().is_some())
                                 .unwrap_or(false);
-                        // A crop anchors the opposite edge; Alt's
-                        // resize-from-center only applies to plain resizes.
+                        // crop anchors the opposite edge; alt's resize-from-center
+                        // only applies to plain resizes
                         let from_center = alt && !(ctrl && crop_eligible);
                         if let Some(drag) = manipulate::begin_scale(
                             &frame,
@@ -403,8 +390,7 @@ pub fn pointer_events(
         }
     }
 
-    // Touch double tap inside the selection frame drags the whole selection,
-    // including empty gaps between the nodes of a multi-selection.
+    // touch double-tap inside the frame drags the whole selection, gaps included
     let double_tap_selection = pointer.is_touch
         && pointer.double_tap
         && !on_selected_label
@@ -421,7 +407,6 @@ pub fn pointer_events(
         return;
     }
 
-    // 2) Node bodies.
     let keep = owner_filter(tabs.active_id(), &q_own);
     let slop = if pointer.is_touch {
         hit::TOUCH_NODE_SLOP_PX * wpp
@@ -430,8 +415,7 @@ pub fn pointer_events(
     };
     let hit = pick_topmost(cursor_world, &q, &keep, &label_hits, slop);
     if let Some((entity, _pose)) = hit {
-        // Double-click on a frame's label: rename the frame (see
-        // `FrameRename`). The first click behaves normally.
+        // double-click on a label renames the frame; the first click behaves normally
         if press_label(
             entity,
             cursor_world,
@@ -443,11 +427,8 @@ pub fn pointer_events(
             *interaction = Interaction::Idle;
             return;
         }
-        // Shift must not decide selection membership at press time: pressing
-        // a selected node with Shift held then dragging moves the selection
-        // (axis-locked, `apply_interaction` reads Shift live), like pressing
-        // first and then holding Shift. A Shift click with no drag toggles
-        // the node off on release instead (see the release handler).
+        // shift can't decide membership at press time: shift+press then drag must
+        // move, so a click with no drag toggles it off on release instead.
         let mut toggle_off = None;
         if shift {
             if selection.contains(entity) {
@@ -458,9 +439,8 @@ pub fn pointer_events(
         } else if !selection.contains(entity) {
             selection.nodes = vec![entity];
         }
-        // Frames stay below their contents: never raise them. A Shift press
-        // on an already-selected node raises nothing either, it may end as
-        // a toggle-off click, which must not touch z-order.
+        // frames stay below their contents: never raise them. a pending
+        // shift-click raises nothing either, it may end as a toggle-off.
         if toggle_off.is_none()
             && !q
                 .get(entity)
@@ -480,8 +460,7 @@ pub fn pointer_events(
         return;
     }
 
-    // 3) Empty space: marquee.
-    // One finger pans the canvas; only a double tap starts a marquee.
+    // one finger pans; only a double tap starts a marquee
     if pointer.is_touch && !pointer.double_tap {
         *interaction = Interaction::Idle;
         return;
@@ -511,7 +490,6 @@ pub fn apply_interaction(
     q_own: Query<(Entity, &TabOwner), Without<InactiveTab>>,
     mut q: NodeQ,
 ) {
-    // PendingMove → Move once the pointer has travelled far enough.
     let mut promote: Option<(Vec2, Vec<(Entity, NodeSnapshot)>)> = None;
     if let Interaction::PendingMove {
         press_screen,
@@ -547,9 +525,7 @@ pub fn apply_interaction(
     let cursor = pointer.screen;
     let cursor_world = cursor.and_then(|c| camera.viewport_to_world_2d(cam_tf, c).ok());
     let wpp = world_per_logical_px(camera, cam_tf).unwrap_or(1.0) as f32;
-    // Snapping only considers nodes the camera can see (plus a falloff
-    // band): aligning to something far off-screen is aimless, and its guide
-    // would run far off-screen too.
+    // snap only against on-screen nodes (plus falloff): an unseen target is aimless
     let snap_view = snap_view_rect(&window, camera, cam_tf, wpp);
 
     match &mut *interaction {
@@ -562,7 +538,6 @@ pub fn apply_interaction(
         } => {
             if let Some(cw) = cursor_world {
                 let raw = cw - *start_world;
-                // Snap to other nodes unless Ctrl is held.
                 let snap_enabled = !crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0);
                 let snapped = if snap_enabled {
                     let dragged = snapshots
@@ -597,10 +572,8 @@ pub fn apply_interaction(
         } => {
             if let Some(cw) = cursor_world {
                 *current_world = cw;
-                // Below the drag threshold this is a plain click, not a
-                // marquee: a zero-size rect would otherwise "select" every
-                // node whose AABB covers the press point (the corner gaps of
-                // rotated nodes being the visible symptom).
+                // below the threshold it's a click, not a marquee; a zero-size
+                // rect would select every node whose aabb covers the press point.
                 if (*current_world - *start_world).length() >= MARQUEE_THRESHOLD_PX * wpp {
                     let rect = Rect::from_corners(*start_world, *current_world);
                     let mut sel = base.clone();
@@ -622,14 +595,12 @@ pub fn apply_interaction(
             if let Some(cw) = cursor_world {
                 let ctrl_now = crate::canvas::ctrl_down(&keys, &chord_mem, chord_frame.0);
                 if ctrl_now && drag.crop_eligible {
-                    // Ctrl held, at press or pressed mid-drag: trim the
-                    // visible region. Both modes are pure functions of the
-                    // press-time snapshot, so switching never compounds.
+                    // ctrl at press or mid-drag: trim the visible region. both
+                    // modes read the press-time snapshot, so switching never compounds.
                     manipulate::apply_crop(drag, cw, wpp, &mut q);
                 } else {
-                    // Shift keeps the resized box's aspect ratio; Alt resizes
-                    // from the center. (The drag set is the selection only,
-                    // see `pointer_events`.)
+                    // shift keeps aspect, alt resizes from the center; the drag
+                    // set is the selection only.
                     let candidates =
                         snap_candidates(&q, &q_own, tabs.active_id(), &drag.snapshots, snap_view);
                     manipulate::apply_scale(
@@ -659,7 +630,7 @@ pub fn prune_selection(mut selection: ResMut<Selection>, q: Query<Entity, With<C
     }
 }
 
-/// Restore the original state and go idle (Escape).
+/// restore the press-time state, then idle (escape)
 pub fn cancel_interaction(interaction: &mut Interaction, q: &mut NodeQ) {
     if let Some(snaps) = interaction.snapshots() {
         for (e, snap) in snaps {

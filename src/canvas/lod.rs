@@ -1,5 +1,5 @@
-//! Texture level-of-detail: previews always, full-res streamed on demand,
-//! LRU-evicted under a VRAM budget. Only the active tab's nodes are streamed.
+//! texture LOD: previews always, full-res streamed for the active tab only,
+//! LRU-evicted under a VRAM budget.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -18,33 +18,30 @@ use super::hit::{aabb_of, rects_overlap};
 use super::node::{CanvasNode, FullLoadTask, ImageNode, InactiveTab, Pose, TabOwner, to_bevy_image_with_usage};
 use crate::project::tabs::Tabs;
 
-/// Viewport expansion factor when deciding what to load.
+/// viewport expansion when deciding what to load.
 const LOAD_MARGIN: f32 = 1.4;
-/// Start loading full-res once the preview is stretched past this fraction
-/// of its native resolution.
+/// start loading full-res once the preview is stretched past this fraction of
+/// native.
 const LOAD_THRESHOLD: f32 = 0.85;
 
-/// Monotonic frame counter for LRU bookkeeping.
+/// monotonic frame counter for lru bookkeeping.
 #[derive(Resource, Default)]
 pub struct FrameCounter(pub u64);
 
-/// Full-res files that already failed to load. Keeps a failure logged once per
-/// file instead of once per retry frame; an entry clears on a successful load.
+/// files that already failed to load, so each logs once instead of once per
+/// retry frame; an entry clears on success.
 #[derive(Resource, Default)]
 pub struct FullLoadWarns(HashSet<PathBuf>);
 
-/// Cooldown for a full-res decode whose file is not available yet. Remote
-/// blobs can arrive after the node that references them; without this the
-/// loader would retry a missing file every frame.
+/// cooldown for a full-res decode whose file isn't there yet; remote blobs can
+/// arrive after the node that references them.
 #[derive(Component)]
 pub struct FullLoadBackoff {
     until: f64,
 }
 
-/// Backstop for resident full-res VRAM. Normally memory is reclaimed
-/// proactively (a texture is dropped once it stops being needed, panned away,
-/// zoomed out, or on an inactive tab); this only caps the actively-viewed
-/// working set if it grows unusually large. Override with `REF_TEX_BUDGET_MB`.
+/// backstop cap on resident full-res vram; memory is normally reclaimed
+/// proactively. override with `REF_TEX_BUDGET_MB`.
 #[derive(Resource)]
 pub struct TexBudget {
     pub max_bytes: u64,
@@ -63,21 +60,20 @@ impl Default for TexBudget {
     }
 }
 
-/// Tunables for proactive full-res reclaim. All overridable without a rebuild.
+/// tunables for proactive full-res reclaim, overridable without a rebuild.
 #[derive(Resource)]
 pub struct TexTuning {
-    /// Keep full-res while the on-screen magnification ratio is at least this.
-    /// Must stay below [`LOAD_THRESHOLD`] (the load trigger) so the tier can't
-    /// flap at the boundary. `REF_TEX_KEEP_RATIO` (default 0.6).
+    /// keep full-res while magnification is at least this; must stay below
+    /// [`LOAD_THRESHOLD`] or the tier flaps at the boundary. `REF_TEX_KEEP_RATIO` (0.6).
     pub keep_ratio: f32,
-    /// Seconds a texture must go unwanted before it is freed.
-    /// `REF_TEX_EVICT_SECS` (default 0.5).
+    /// seconds a texture must go unwanted before it is freed.
+    /// `REF_TEX_EVICT_SECS` (0.5).
     pub evict_secs: f64,
-    /// Seconds of stillness required before freeing (frees never run during a
-    /// gesture). `REF_TEX_MOTION_IDLE_SECS` (default 0.15).
+    /// stillness required before freeing (never free mid-gesture).
+    /// `REF_TEX_MOTION_IDLE_SECS` (0.15).
     pub motion_idle_secs: f64,
-    /// Cap on frees per frame, so shedding a big backlog can't spike a frame.
-    /// `REF_TEX_EVICT_PER_FRAME` (default 6).
+    /// cap on frees per frame so shedding a backlog can't spike a frame.
+    /// `REF_TEX_EVICT_PER_FRAME` (6).
     pub max_evictions_per_frame: usize,
 }
 
@@ -97,56 +93,38 @@ impl Default for TexTuning {
     }
 }
 
-/// Main-world frames a texture change must age before the render world is
-/// trusted to have prepared it (extraction lags the change by one frame, plus
-/// one frame of margin).
+/// frames a texture change must age before the render world is trusted to have
+/// prepared it (extraction lags one frame, plus margin).
 const SETTLE_GRACE: u64 = 2;
 
-/// Tracks freshly added or changed full-res textures until the render world has
-/// prepared them (a `GpuImage` exists for the handle).
-///
-/// Freeing `Image::data` or flipping `Image::sampler` is only safe once the
-/// previous version of the asset is on the GPU. Bevy prepares render assets
-/// under a per-frame byte budget (`RenderAssetBytesPerFrame`) and drops the
-/// old GPU texture as soon as a new version of the asset is extracted, *before*
-/// that version is prepared. If another change then replaces the still-queued
-/// version (e.g. the CPU copy is freed while the first upload is still queued),
-/// the final version has neither pixel data nor a previous texture to reuse, so
-/// Bevy builds an **empty** texture, the image renders fully transparent until
-/// restart. This state gates those mutations: nothing touches an image asset
-/// until its previous change has been seen in `RenderAssets<GpuImage>`
-/// (settled in [`sync_gpu_textures`]).
+/// full-res uploads waiting on the render world; don't mutate an image until
+/// its previous change settles in `RenderAssets<GpuImage>`.
 #[derive(Resource, Default)]
 pub struct GpuTextureState {
-    /// Handle id → main-world frame of the change awaiting confirmation.
+    /// handle id → main-world frame of the change awaiting confirmation.
     unsettled: HashMap<AssetId<Image>, u64>,
 }
 
 impl GpuTextureState {
-    /// True while any changed texture is still waiting on the render world:
-    /// queued for upload under the per-frame byte budget. The idle throttle
-    /// reads this so the loop keeps rendering until uploads drain, instead of
-    /// trickling at the budget once per heartbeat.
+    /// true while a changed texture is still queued for upload; the idle throttle
+    /// reads this to keep rendering until uploads drain.
     pub fn has_pending(&self) -> bool {
         !self.unsettled.is_empty()
     }
 
-    /// True when the asset's last change has reached the GPU (or the asset is
-    /// gone), so mutating it again cannot race the render queue.
+    /// true when the asset's last change reached the gpu (or the asset is gone),
+    /// so mutating it again can't race the render queue.
     fn settled(&self, id: AssetId<Image>) -> bool {
         !self.unsettled.contains_key(&id)
     }
 
-    /// Record a change (add or mutation) the render world must confirm.
+    /// record a change (add or mutation) the render world must confirm.
     pub(crate) fn touch(&mut self, id: AssetId<Image>, frame: u64) {
         self.unsettled.insert(id, frame);
     }
 }
 
-/// Render-world half of [`GpuTextureState`]: settles changed handles once their
-/// `GpuImage` shows up (or the asset was dropped, e.g. evicted). Runs in
-/// `ExtractSchedule`, the only point where the render world can touch the
-/// stopped main world.
+/// settles handles once their gpu image exists or the asset was dropped.
 pub fn sync_gpu_textures(
     mut main_world: ResMut<MainWorld>,
     gpu_images: Res<RenderAssets<GpuImage>>,
@@ -170,8 +148,7 @@ pub fn sync_gpu_textures(
             if now.saturating_sub(*touched) < SETTLE_GRACE {
                 return false;
             }
-            // Prepared, or dropped (evicted / node despawned): nothing left
-            // to wait for.
+            // prepared or dropped (evicted / despawned): nothing left to wait for.
             gpu_images.get(*id).is_some()
                 || main_world
                     .get_resource::<Assets<Image>>()
@@ -189,7 +166,7 @@ pub fn sync_gpu_textures(
     }
 }
 
-/// Wire [`sync_gpu_textures`] into the render app (no-op when headless).
+/// wire [`sync_gpu_textures`] into the render app (no-op when headless).
 pub fn register_gpu_texture_sync(app: &mut App) {
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
@@ -197,7 +174,6 @@ pub fn register_gpu_texture_sync(app: &mut App) {
     render_app.add_systems(ExtractSchedule, sync_gpu_textures.ambiguous_with_all());
 }
 
-/// Whether the node's world AABB overlaps the (expanded) view rect.
 fn node_visible(node: &CanvasNode, tf: &Transform, view_rect: Rect) -> bool {
     let pose = Pose {
         center: tf.translation.truncate(),
@@ -207,12 +183,8 @@ fn node_visible(node: &CanvasNode, tf: &Transform, view_rect: Rect) -> bool {
     rects_overlap(aabb_of(&pose), view_rect)
 }
 
-/// On-screen magnification of an image, relative to its preview texture
-/// (screen px per preview texel). Full-res is loaded once this passes
-/// [`LOAD_THRESHOLD`] and kept until it falls below
-/// [`TexTuning::keep_ratio`], the gap is the hysteresis that stops the tier
-/// flapping at the boundary. Uses the *cropped* region, so zooming into a small
-/// crop needs the full-res sooner.
+/// on-screen magnification relative to the preview (screen px per preview texel).
+/// uses the *cropped* region, so zooming into a small crop needs full-res sooner.
 fn full_ratio(img: &ImageNode, node_size: Vec2, wpp: f32) -> f32 {
     let screen_max = node_size.max_element() / wpp;
     let preview_ratio = img.data.preview_size.max_element().max(1) as f32
@@ -248,10 +220,10 @@ pub fn suspend_inactive_textures(
 #[derive(Component)]
 pub struct ParkedMesh(Mesh2d);
 
-// Bound material rebuilds and teardown during large tab switches.
+// bound material rebuilds/teardown on large tab switches.
 pub(crate) const TAB_MESHES_PER_FRAME: usize = 256;
 
-// Run after sprite material updates so inactive tabs leave the render workload.
+// after sprite material updates, so inactive tabs leave the render workload.
 pub fn park_inactive_meshes(
     mut commands: Commands,
     meshes: Query<(Entity, &Mesh2d), With<InactiveTab>>,
@@ -272,8 +244,8 @@ pub fn resume_active_meshes(
     }
 }
 
-/// Never more than this many full-res loads in flight: zooming into a dense
-/// area would otherwise queue a dozen ~33 MB decodes/uploads at once.
+/// max full-res loads in flight; a dense zoom would otherwise queue a dozen
+/// ~33 MB decodes/uploads at once.
 const MAX_FULL_LOADS_IN_FLIGHT: usize = 3;
 
 #[allow(clippy::too_many_arguments)]
@@ -295,16 +267,13 @@ pub fn ensure_full_textures(
         &TabOwner,
     ), Without<InactiveTab>>,
 ) {
-    // A live window resize churns visibility every frame. Don't start new
-    // decodes mid-drag: they would finish and upload while the user is still
-    // dragging, hitching the very frames that must stay smooth. Resumes the
-    // moment the drag settles.
+    // no new decodes mid-resize: they'd finish and upload during the drag,
+    // hitching the frames that must stay smooth.
     if resize.is_active() {
         return;
     }
-    // Cap concurrent full-res loads (see MAX_FULL_LOADS_IN_FLIGHT). Enforced
-    // per-node inside the loop instead of returning here: the visibility/LRU
-    // bookkeeping below must keep running even while the cap is saturated.
+    // cap loads per node instead of returning here: visibility/lru bookkeeping
+    // must keep running while the cap is saturated.
     let mut in_flight = q
         .iter()
         .filter(|(_, _, _, task, _, _)| task.is_some())
@@ -333,24 +302,21 @@ pub fn ensure_full_textures(
         let Some(img) = node.image_mut() else {
             continue;
         };
-        // "Load" needs the full preview threshold; "keep" only the lower
-        // hysteresis threshold, so a texture isn't dropped and immediately
-        // reloaded when the user hovers around the boundary.
+        // "load" needs the full threshold, "keep" only the lower hysteresis one,
+        // so hovering at the boundary doesn't drop and immediately reload.
         let ratio = full_ratio(img, node_size, wpp);
         let load_needed = visible && ratio >= LOAD_THRESHOLD;
         let keep_needed = visible && ratio >= tuning.keep_ratio;
         if img.full.is_some() {
-            // Refresh the LRU stamp while it's still wanted; letting it lapse
-            // is what marks it for proactive release.
+            // refresh the lru stamp while wanted; letting it lapse marks it for release.
             if keep_needed {
                 img.last_needed = now;
             }
             continue;
         }
         if img.full_incoming.is_some() {
-            // Decode finished; waiting for the GPU before it is bound. If it's
-            // no longer wanted, drop it instead of binding a texture the user
-            // has already navigated away from.
+            // decode done, waiting on the gpu; drop it if no longer wanted instead
+            // of binding a texture the user navigated away from.
             if keep_needed {
                 img.last_needed = now;
             } else {
@@ -393,8 +359,7 @@ pub fn collect_full_textures(
     mut warns: ResMut<FullLoadWarns>,
     mut q: Query<(Entity, &mut CanvasNode, &mut FullLoadTask), Without<InactiveTab>>,
 ) {
-    // Hold finished decodes until the drag settles: a full-res upload is a
-    // multi-frame cost that would hitch the resize itself.
+    // hold finished decodes until the drag settles; the upload would hitch it.
     if resize.is_active() {
         return;
     }
@@ -409,22 +374,19 @@ pub fn collect_full_textures(
                     }
                     debug!("full-res decoded: {}x{}", image.width(), image.height());
                     let handle = images.add(image);
-                    // The upload may be deferred by the per-frame byte budget:
-                    // mark it in flight until the render world confirms it
-                    // (see [`GpuTextureState`]). Do NOT bind it to the sprite
-                    // yet; see [`bind_pending_full_textures`].
+                    // defer binding until the upload is confirmed; see GpuTextureState
                     tex_state.touch(handle.id(), frame.0);
                     if let Some(img) = node.image_mut() {
                         img.full_incoming = Some(handle);
                     }
                 }
                 Err(err) => {
-                    // Retry after a short cooldown: a file that is still being
-                    // replicated should not be read again on every frame.
+                    // retry after a cooldown: a file still being replicated
+                    // shouldn't be read every frame.
                     commands.entity(entity).insert(FullLoadBackoff {
                         until: time.elapsed_secs_f64() + 2.0,
                     });
-                    // Retried every cooldown while visible: report each file once.
+                    // retried every cooldown while visible; report each file once.
                     if let Some(img) = node.image() {
                         let path = img.data.abs_path.clone();
                         if warns.0.insert(path.clone()) {
@@ -437,12 +399,7 @@ pub fn collect_full_textures(
     }
 }
 
-/// Promote a decoded full-res texture to the visible tier once its `GpuImage`
-/// has actually reached the render world (see `GpuTextureState`). Deferring the
-/// sprite rebind this way keeps Bevy's sprite material from being created
-/// against an `Image` that isn't prepared yet, which would leave the mesh
-/// drawn with a placeholder material-slot binding (slab 0, slot 0) for a frame,
-/// sampling an arbitrary *other* image.
+/// bind full-res only after its gpu image exists; earlier binds sample a placeholder.
 pub fn bind_pending_full_textures(
     tex_state: Res<GpuTextureState>,
     mut q: Query<(&mut CanvasNode, &mut Sprite), Without<InactiveTab>>,
@@ -454,7 +411,7 @@ pub fn bind_pending_full_textures(
         let Some(handle) = img.full_incoming.clone() else {
             continue;
         };
-        // Wait until the render world has the texture on the GPU.
+        // wait for the texture to reach the gpu.
         if !tex_state.settled(handle.id()) {
             continue;
         }
@@ -464,24 +421,15 @@ pub fn bind_pending_full_textures(
         img.pending_cpu_free = Some(handle.clone());
         img.full_incoming = None;
         sprite.image = handle;
-        // Switched to the full-res tier: the rect becomes the natural-space
-        // crop (full-res textures are natural-sized).
+        // full-res tier: rect becomes the natural-space crop.
         if let Some(img) = node.image() {
             sprite.rect = Some(img.active_rect());
         }
     }
 }
 
-/// Proactive release of full-res textures, so VRAM tracks what's actually
-/// being looked at instead of only accumulating. A texture whose `last_needed`
-/// stamp has lapsed past the grace window (panned away, zoomed out, or on an
-/// inactive tab) is swapped back to its preview. The `TexBudget` remains only
-/// as a backstop for the actively-viewed working set.
-///
-/// Frees are deferred while the view is moving (so fast zoom/pan never hitches
-/// on a texture teardown or material rebuild) and rate-limited per frame (so
-/// shedding a big backlog can't spike a frame). Nodes still stamped this frame
-/// are never evicted, so there's no reload thrash.
+/// swap full-res back to preview once `last_needed` lapses; the tex budget is
+/// only a backstop. frees wait for the view to settle and are rate-limited.
 pub fn evict_full_textures(
     time: Res<Time>,
     tuning: Res<TexTuning>,
@@ -491,14 +439,14 @@ pub fn evict_full_textures(
     mut redraw: MessageWriter<RequestRedraw>,
     mut q: Query<(Entity, &mut CanvasNode, &mut Sprite), Without<InactiveTab>>,
 ) {
-    // Don't evict mid-drag: a shrinking window would free textures that the
-    // next growth step needs again (thrash), and the frees hitch the drag.
+    // no evictions mid-drag: a shrinking window would free textures the next
+    // growth step needs again (thrash), and frees hitch the drag.
     if resize.is_active() {
         return;
     }
     let now = time.elapsed_secs_f64();
-    // Only free while the view is still, unless we're over the backstop, in
-    // which case we must shed regardless of motion to stay bounded.
+    // free only while the view is still, unless over the backstop, where we must
+    // shed regardless of motion to stay bounded.
     let still = now - motion.last_change() > tuning.motion_idle_secs;
 
     let mut total: u64 = 0;
@@ -511,8 +459,8 @@ pub fn evict_full_textures(
             total += img.resident_bytes;
             candidates.push((img.last_needed, e));
         } else if img.full_incoming.is_some() {
-            // Decoded but not yet bound (e.g. the tab was switched away):
-            // release it if it has gone stale. It isn't counted in `total`.
+            // decoded but not yet bound (e.g. tab switched away): release if stale;
+            // not counted in `total`.
             candidates.push((img.last_needed, e));
         }
     }
@@ -524,8 +472,8 @@ pub fn evict_full_textures(
     let mut evicted = 0usize;
     let mut backlog = false;
     for (last, e) in candidates {
-        // Oldest first: once the oldest is neither stale nor over budget,
-        // nothing after it can be either.
+        // oldest first: once the oldest is neither stale nor over budget, nothing
+        // after it can be.
         if now - last <= tuning.evict_secs && total <= budget.max_bytes {
             break;
         }
@@ -546,7 +494,7 @@ pub fn evict_full_textures(
             img.pending_cpu_free = None;
             img.resident_bytes = 0;
             sprite.image = img.data.preview.clone();
-            // Back on the preview tier: scale the crop into preview space.
+            // back on the preview tier: scale the crop into preview space.
             sprite.rect = Some(img.data.tier_rect(false));
             evicted += 1;
         } else if img.full_incoming.is_some() {
@@ -555,14 +503,13 @@ pub fn evict_full_textures(
         }
     }
     if backlog {
-        // Keep frames coming so the backlog drains promptly instead of one
-        // batch per idle heartbeat.
+        // keep frames coming so the backlog drains promptly.
         redraw.write(RequestRedraw);
     }
 }
 
-/// Periodic VRAM accounting at debug level: resident full-res and preview
-/// bytes, so reclaim can be watched (`RUST_LOG=refcanvas=debug`).
+/// periodic vram accounting at debug level, so reclaim can be watched
+/// (`RUST_LOG=refcanvas=debug`).
 pub fn log_vram_stats(frame: Res<FrameCounter>, q: Query<&CanvasNode>) {
     if frame.0 % 240 != 0 {
         return;
@@ -587,10 +534,8 @@ pub fn log_vram_stats(frame: Res<FrameCounter>, q: Query<&CanvasNode>) {
     );
 }
 
-/// Once a freshly uploaded full-res texture is on the GPU (confirmed via
-/// [`GpuTextureState`]), drop its CPU copy to reclaim memory. The main-world
-/// asset stays (with `data: None`) so the sampler can still be flipped at
-/// runtime.
+/// once a full-res texture is confirmed on the gpu, drop its cpu copy.
+/// the asset stays (`data: None`) so the sampler can still be flipped at runtime.
 pub fn release_cpu_image_data(
     frame: Res<FrameCounter>,
     mut images: ResMut<Assets<Image>>,
@@ -604,9 +549,8 @@ pub fn release_cpu_image_data(
         let Some(handle) = img.pending_cpu_free.clone() else {
             continue;
         };
-        // Never free before the texture exists on the GPU: the now data-less
-        // re-prepare could replace the still-queued first upload and leave an
-        // empty (transparent) texture. See [`GpuTextureState`].
+        // never free before the gpu texture exists: a re-prepare could replace
+        // the queued upload and leave it empty (see GpuTextureState).
         if !tex_state.settled(handle.id()) {
             continue;
         }
@@ -618,20 +562,11 @@ pub fn release_cpu_image_data(
     }
 }
 
-/// Screen px per image texel where the full-res tier flips to nearest sampling
-/// when zooming in (pixel peeping), and back to linear below (hysteresis, so
-/// browsing stays smooth). Tweak these numbers and save, the runner
-/// hot-patches the flip. Lower `NEAREST_AT` = switches to pixely sooner.
+/// full-res switches to nearest above this screen-px/texel ratio, with hysteresis below.
 const NEAREST_AT: f32 = 2.0;
 const NEAREST_BACK: f32 = 1.6;
 
-/// Bevy 0.20 precalculates 2D transparent sort keys when an item is queued and
-/// never refreshes them on transform changes (`recalculate_sort_keys` is a
-/// no-op for `Transparent2d`), so changing a node's `z` alone does not reorder
-/// anything until the entity happens to be re-queued. Re-insert the entity's
-/// material handle whenever its `z` changes: that marks `MeshMaterial2d` as
-/// changed, which flags the entity for re-specialization and re-queues it with
-/// its current sort key.
+// 2d sort keys are cached on queue; re-insert the material to pick up a z change.
 pub fn requeue_on_z_change(
     mut commands: Commands,
     mut seen: Local<std::collections::HashMap<Entity, f32>>,
@@ -640,7 +575,7 @@ pub fn requeue_on_z_change(
     for (entity, tf, material) in &sprites {
         let z = tf.translation.z;
         if seen.insert(entity, z) != Some(z) {
-            // First sight or a changed `z`: force a re-queue.
+            // first sight or a changed `z`: force a re-queue.
             commands
                 .entity(entity)
                 .insert(MeshMaterial2d(material.0.clone()));
@@ -648,9 +583,8 @@ pub fn requeue_on_z_change(
     }
 }
 
-/// Pixel peeping: once a full-res texture is magnified past [`NEAREST_AT`]
-/// screen px per texel, switch it to nearest sampling so individual image
-/// pixels are crisp. Flip back to linear below [`NEAREST_BACK`].
+/// pixel peeping: past [`NEAREST_AT`] screen px per texel, switch full-res to
+/// nearest so image pixels are crisp; back to linear below [`NEAREST_BACK`].
 pub fn update_texture_samplers(
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform)>,
@@ -691,10 +625,7 @@ pub fn update_texture_samplers(
         let Some(img) = node.image_mut() else {
             continue;
         };
-        // Heal a tier desync: whenever a full-res texture exists it must be
-        // the one on screen. (Restore/preview races can leave the sprite
-        // rebound to the preview while `full` stays set, the visible symptom
-        // is a soft, blocky preview under the pixel-peeping zoom.)
+        // heal tier desync: a set full texture must be the one on screen
         if let Some(full) = img.full.as_ref() {
             if sprite.image != *full {
                 debug!("tier repair: sprite rebound to full-res");
@@ -702,9 +633,7 @@ pub fn update_texture_samplers(
                 sprite.rect = Some(img.active_rect());
             }
         }
-        // Twice a second, for any node magnified past 1x, report which tier
-        // is bound, whether it is on screen, and the current sampling mode,
-        // useful when debugging the pixel-peeping chain at debug log level.
+        // twice a second, log the tier state of any node magnified past 1x.
         if frame.0 % 120 == 0 {
             let ratio =
                 (node_size.max_element() / wpp) / img.data.crop.size().max_element().max(1.0);
@@ -726,7 +655,7 @@ pub fn update_texture_samplers(
             }
         }
         let Some(full) = img.full.clone() else {
-            // Back on the preview tier: forget our material so the next
+            // back on the preview tier: forget our material so the next
             // full-res bind builds a fresh one.
             if img.sprite_material.is_some() {
                 img.sprite_material = None;
@@ -734,13 +663,8 @@ pub fn update_texture_samplers(
             continue;
         };
 
-        // Own the material. Bevy renders `Sprite`s through cached
-        // `SpriteMeshMaterial`s that bake the image sampler in when the
-        // material is prepared, flipping `Image::sampler` alone never
-        // reaches the screen. Rebuild a fresh material whenever the entity
-        // no longer carries ours (the sprite changed and Bevy re-inserted its
-        // cached one) or right after a flip. A frame passes between the flip
-        // and this rebuild, so the `GpuImage` already has the new sampler.
+        // samplers are baked into cached sprite materials; rebuild after a flip
+        // or when the material isn't ours.
         if let Some(mut mat) = material {
             let ours = img.sprite_material.as_ref().is_some_and(|h| h == &mat.0);
             if !ours {
@@ -751,17 +675,13 @@ pub fn update_texture_samplers(
                 }
             }
         }
-        // A sampler flip re-prepares the render asset: that is free once the
-        // CPU copy is gone (Bevy reuses the texture and only swaps the sampler),
-        // but it re-uploads the whole image while the data is still attached.
-        // `release_cpu_image_data` clears it a few frames after the load, wait
-        // for that instead of causing a second copy of the first-zoom hitch.
+        // a sampler flip re-uploads while cpu data is attached; wait for the
+        // free to avoid a second hitch.
         if img.pending_cpu_free.is_some() {
             continue;
         }
-        // On-screen? Tested here, not via `last_needed`, so flipping
-        // never depends on the loader's per-frame bookkeeping (which pauses
-        // while loads are in flight).
+        // on-screen test here, not via `last_needed`, so flipping doesn't depend
+        // on loader bookkeeping (which pauses while loads are in flight).
         if !visible {
             continue;
         }
@@ -774,10 +694,8 @@ pub fn update_texture_samplers(
             ratio > NEAREST_AT
         };
         if want_nearest != img.sampler_nearest {
-            // Don't flip while the previous change to this image is still in
-            // the render queue: the flip's re-prepare could replace it and be
-            // prepared without a previous texture (empty texture; see
-            // [`GpuTextureState`]). It flips a frame or two later.
+            // don't flip while the previous change is queued; it could
+            // re-prepare empty. flips a frame or two later.
             if !tex_state.settled(full.id()) {
                 continue;
             }
@@ -792,7 +710,7 @@ pub fn update_texture_samplers(
                     bevy::image::ImageSampler::linear()
                 };
                 img.sampler_nearest = want_nearest;
-                // The material carries the sampler; rebuild it next frame.
+                // material carries the sampler; rebuild next frame.
                 img.sprite_material = None;
                 tex_state.touch(full.id(), frame.0);
             } else {

@@ -19,7 +19,7 @@ use crate::canvas::node::{CanvasNode, InactiveTab, TabOwner};
 use crate::canvas::selection::{Interaction, Selection};
 use crate::canvas::undo::UndoStack;
 
-use super::import::ImportQueue;
+use super::import::{self, ImportQueue};
 use super::local;
 use super::oplog::{self, Change, Clock, FileMark, Journal, MergeState};
 use super::persist::{self, PersistenceState, PreviewLoader};
@@ -533,8 +533,18 @@ pub fn open_tab_at(root: &Path, id: u64, clock: &mut Clock) -> anyhow::Result<Op
     let mut merge = cached.merge;
     let mut files = cached.files;
 
-    if let Err(err) = oplog::read_project(&store.root, &mut merge, &mut files) {
-        warn!("initial project read failed: {err:#}");
+    let read_ok = match oplog::read_project(&store.root, &mut merge, &mut files) {
+        Ok(_) => true,
+        Err(err) => {
+            warn!("initial project read failed: {err:#}");
+            false
+        }
+    };
+    if read_ok {
+        let removed = import::sweep_orphaned_media(&store, &merge, import::MEDIA_RETENTION);
+        if removed > 0 {
+            info!("removed {removed} orphaned media file(s)");
+        }
     }
 
     if let Some(rev) = merge.max_seen() {

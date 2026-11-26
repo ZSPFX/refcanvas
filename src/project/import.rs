@@ -9,8 +9,9 @@
 //! 3. build + cache a preview (`<root>/cache/<hash>_512.{png|jpg}`)
 //! 4. hand the decoded preview pixels back for GPU upload
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
@@ -23,11 +24,14 @@ use crate::canvas::node::{ImageData, NodeSnapshot, Pose, to_bevy_image};
 use crate::canvas::undo::{NodeData, NodeRecord, UndoEntry, UndoStack};
 use crate::project::tabs::Tabs;
 
+use super::oplog::MergeState;
 use super::store::ProjectStore;
 
 /// Preview longest edge, pixels. Canonical preview cap: `persist`'s
 /// regenerator and `node`'s pre-load size guess must both match it.
 const PREVIEW_MAX: u32 = 512;
+/// keep unreferenced media this long before deleting it
+pub const MEDIA_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Max concurrent import decodes.
 const MAX_IN_FLIGHT: usize = 6;
 /// Max images pulled from one dropped folder (safety valve).
@@ -530,4 +534,178 @@ pub fn read_preview_cache(dir: &std::path::Path, short: &str) -> Option<image::D
         }
     }
     None
+}
+
+/// remove image and preview files no visible node references
+pub fn sweep_orphaned_media(
+    store: &ProjectStore,
+    merge: &MergeState,
+    retention: Duration,
+) -> usize {
+    if merge.nodes.is_empty() {
+        return 0;
+    }
+    let mut images = HashSet::new();
+    let mut hashes = HashSet::new();
+    for (_, node) in merge.visible_nodes() {
+        if node.kind != "image" {
+            continue;
+        }
+        if let Some(src) = &node.src
+            && let Some(name) = Path::new(src).file_name().and_then(|n| n.to_str())
+        {
+            images.insert(name.to_string());
+            if let Some(stem) = Path::new(name).file_stem().and_then(|s| s.to_str()) {
+                hashes.insert(stem.to_string());
+            }
+        }
+        if let Some(hash) = &node.hash
+            && !hash.is_empty()
+        {
+            hashes.insert(hash.clone());
+        }
+    }
+
+    let now = SystemTime::now();
+    let mut removed = sweep_files(&store.images_dir(), now, retention, |name| {
+        images.contains(name)
+    });
+    removed += sweep_files(&store.cache_dir(), now, retention, |name| {
+        preview_hash(name).is_none_or(|hash| hashes.contains(hash))
+    });
+    removed
+}
+
+fn sweep_files(
+    dir: &Path,
+    now: SystemTime,
+    retention: Duration,
+    keep: impl Fn(&str) -> bool,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name.contains(".sync-conflict-") {
+            continue;
+        }
+        if keep(&name) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Some(mtime) = meta.modified().ok() else {
+            continue;
+        };
+        let old = now
+            .duration_since(mtime)
+            .map(|age| age >= retention)
+            .unwrap_or(false);
+        if old && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn preview_hash(name: &str) -> Option<&str> {
+    let stem = name
+        .strip_suffix(".png")
+        .or_else(|| name.strip_suffix(".jpg"))?;
+    stem.strip_suffix("_512")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::oplog::{Rev, SavedNode};
+    use uuid::Uuid;
+
+    fn image_node(src: &str, hash: &str) -> SavedNode {
+        SavedNode {
+            kind: "image".to_string(),
+            src: Some(src.to_string()),
+            hash: Some(hash.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn orphaned_media_is_swept_after_retention() {
+        let root = std::env::temp_dir().join(format!(
+            "refcanvas-media-{}-{}",
+            std::process::id(),
+            Uuid::now_v7()
+        ));
+        let store = ProjectStore { root: root.clone() };
+        store.ensure_dirs().unwrap();
+        let mut merge = MergeState::default();
+        merge.merge(
+            Uuid::now_v7(),
+            Rev {
+                w: 1,
+                c: 0,
+                d: "dev".to_string(),
+                n: 0,
+            },
+            false,
+            Some(image_node("images/used.png", "used")),
+        );
+        merge.merge(
+            Uuid::now_v7(),
+            Rev {
+                w: 1,
+                c: 1,
+                d: "dev".to_string(),
+                n: 0,
+            },
+            false,
+            Some(image_node("images/missing.png", "missing")),
+        );
+
+        for path in [
+            store.images_dir().join("used.png"),
+            store.images_dir().join("orphan.png"),
+            store.cache_dir().join("used_512.png"),
+            store.cache_dir().join("missing_512.png"),
+            store.cache_dir().join("orphan_512.jpg"),
+            store.cache_dir().join("legacy.cache"),
+            store.cache_dir().join(".hidden"),
+            store
+                .cache_dir()
+                .join("orphan_512.jpg.sync-conflict-20260101-000000-ABCDEFG"),
+        ] {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        assert_eq!(
+            sweep_orphaned_media(&store, &merge, Duration::from_secs(3600)),
+            0
+        );
+        assert!(store.images_dir().join("orphan.png").exists());
+        assert!(store.cache_dir().join("orphan_512.jpg").exists());
+
+        assert_eq!(sweep_orphaned_media(&store, &merge, Duration::ZERO), 2);
+        assert!(store.images_dir().join("used.png").exists());
+        assert!(!store.images_dir().join("orphan.png").exists());
+        assert!(store.cache_dir().join("used_512.png").exists());
+        assert!(store.cache_dir().join("missing_512.png").exists());
+        assert!(!store.cache_dir().join("orphan_512.jpg").exists());
+        assert!(store.cache_dir().join("legacy.cache").exists());
+        assert!(store.cache_dir().join(".hidden").exists());
+        assert!(
+            store
+                .cache_dir()
+                .join("orphan_512.jpg.sync-conflict-20260101-000000-ABCDEFG")
+                .exists()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

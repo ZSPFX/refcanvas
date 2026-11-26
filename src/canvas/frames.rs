@@ -20,6 +20,7 @@ const FRAME_FILL_ALPHA: f32 = 0.025;
 const FRAME_BORDER_ALPHA: f32 = 0.28;
 const LABEL_ALPHA: f32 = 0.8;
 const LABEL_FONT_SIZE: f32 = 16.0;
+const LABEL_Z_OFFSET: f32 = 1.0;
 
 /// world-space label hit boxes, refreshed by [`update_frame_labels`]; picking
 /// treats the text as chrome, so a click selects or moves the frame.
@@ -150,6 +151,7 @@ pub fn update_frame_labels(
     // `Without<FrameLabel>` makes this disjoint from the label query: both
     // touch `Transform`.
     frames: Query<(&CanvasNode, &TabOwner, &Transform), (Without<FrameLabel>, Without<InactiveTab>)>,
+    all: Query<(&TabOwner, &Transform), (Without<FrameLabel>, Without<InactiveTab>)>,
     mut labels: Query<(
         &FrameLabel,
         &mut Transform,
@@ -160,6 +162,11 @@ pub fn update_frame_labels(
 ) {
     let wpp = (view.scale() as f32).max(1e-4);
     let active = tabs.active_id();
+    let max_z = all
+        .iter()
+        .filter(|(owner, _)| active == Some(owner.0))
+        .map(|(_, tf)| tf.translation.z)
+        .fold(f32::NEG_INFINITY, f32::max);
     hits.0.clear();
     for (label, mut tf, mut vis, layout) in &mut labels {
         let Ok((node, owner, frame_tf)) = frames.get(label.0) else {
@@ -173,10 +180,15 @@ pub fn update_frame_labels(
         }
         *vis = Visibility::Inherited;
         tf.scale = Vec3::splat(wpp);
+        let z = if max_z.is_finite() {
+            max_z - frame_tf.translation.z + LABEL_Z_OFFSET
+        } else {
+            LABEL_Z_OFFSET
+        };
         tf.translation = Vec3::new(
             -node.size.x * 0.5 + 2.0 * wpp,
             node.size.y * 0.5 + 4.0 * wpp,
-            0.0,
+            z,
         );
 
         // bottom-left anchored; layout is physical px, convert to logical first
